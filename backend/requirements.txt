@@ -1,0 +1,16 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+motor>=3.6
+pymongo>=4.9
+pydantic>=2.9
+pydantic-settings>=2.6
+python-multipart>=0.0.12
+pyyaml>=6.0
+
+# Controller graph, and the HTTP client the intent classifier uses.
+langgraph>=0.2
+httpx>=0.27
+
+# Inference is deliberately not listed here: the service starts and serves
+# without it, reporting the specialist as unavailable. To actually run GeoChat,
+# also install scripts/requirements.txt (torch, transformers, bitsandbytes).

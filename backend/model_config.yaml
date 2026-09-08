@@ -1,0 +1,20 @@
+# SatQuery AI — model registry configuration
+#
+# Each top-level key is a task name resolvable via
+# `ModelRegistry.get_model(task_name)`. Specialist model nodes are dropped in
+# later by pointing these entries at real checkpoints; the schema stays fixed.
+
+vqa_grounding:
+  base_model: MBZUAI/geochat-7B
+  adapter_path: ./weights/adapters/geochat-lora-rsvqa
+  quantization: 4bit          # one of: none | 8bit | 4bit
+  device: cuda:0              # one of: cpu | cuda | cuda:N | mps
+
+change_detection:
+  method: siamese_diff        # one of: siamese_diff | image_diff | cva
+  diff_backbone: resnet50
+
+optical_sar_fusion:
+  encoder: vit_base_patch16_224
+  checkpoint_path: ./weights/fusion/opt_sar_vitb16.pth
+  fusion_strategy: cross_attention   # one of: concat | cross_attention | gated

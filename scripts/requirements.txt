@@ -1,0 +1,9 @@
+# Inference-only deps for the zero-shot smoke test.
+# Install torch first, matched to your CUDA version: https://pytorch.org/get-started/locally/
+torch>=2.4
+transformers>=4.44
+accelerate>=0.34
+bitsandbytes>=0.43
+sentencepiece>=0.2
+pillow>=10.4
+protobuf>=4.25
