@@ -164,6 +164,7 @@ export default function Console() {
           <QueryConsole disabled={panes.length === 0} busy={busy} onSubmit={runQuery} />
           <ResultPanel
             result={result}
+            panes={panes}
             busy={busy}
             hasScene={panes.length > 0}
             transportError={transportError}

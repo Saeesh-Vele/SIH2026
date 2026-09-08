@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Zero-shot GeoChat VQA smoke test.
+"""Zero-shot VQA smoke test for the LLaVA-family checkpoint.
 
-Loads a GeoChat checkpoint and runs a single VQA inference on one image,
-printing the answer. Run this before trusting the controller's VQA node — it
-exercises the same code, `backend/app/models/geochat.py`, so a pass here means
-the graph will run too.
+Loads any LLaVA-compatible checkpoint and runs a single VQA inference on one
+image, printing the answer. Run this before trusting the controller's VQA node
+— it exercises the same code, `backend/app/models/geochat.py`, so a pass here
+means the graph will run too.
 
     python scripts/test_geochat_zeroshot.py --image samples/airport.png \
         --question "How many aircraft are visible on the tarmac?"
+
+The default checkpoint is `llava-hf/llava-1.5-7b-hf`; `--model` takes any other
+LLaVA-compatible repo id or local path. GeoChat is not required — `--loader
+geochat` exists for GeoChat-format checkpoints and needs the official `geochat`
+package, which pins a 2023-era dependency stack.
 
 4-bit is the default and needs a CUDA GPU; bitsandbytes has no CPU or MPS 4-bit
 kernel. On a machine without one, pass `--quantization none --device cpu`.
@@ -39,10 +44,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"HF repo id or local path (default: {DEFAULT_MODEL})")
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"LLaVA-compatible HF repo id or local path (default: {DEFAULT_MODEL})",
+    )
     parser.add_argument("--image", required=True, type=Path, help="Path to the sample image")
     parser.add_argument("--question", default=DEFAULT_QUESTION, help="VQA question to ask")
-    parser.add_argument("--adapter", default=None, help="Optional LoRA adapter path")
+    parser.add_argument(
+        "--adapter", default=None, help="Optional LoRA adapter path (reported in model_used)"
+    )
     parser.add_argument("--quantization", choices=("none", "8bit", "4bit"), default="4bit")
     parser.add_argument("--device", default="cuda:0", help="Device map target (default: cuda:0)")
     parser.add_argument("--max-new-tokens", type=int, default=256)
@@ -51,7 +62,11 @@ def parse_args() -> argparse.Namespace:
         "--loader",
         choices=("auto", "geochat", "llava"),
         default="auto",
-        help="auto: use the geochat package if importable, else transformers LLaVA",
+        help=(
+            "llava: transformers' generic LLaVA classes (the working path). "
+            "geochat: the official geochat package, for GeoChat-format checkpoints. "
+            "auto (default): geochat if importable, else llava"
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Print the raw result object")
     return parser.parse_args()

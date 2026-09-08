@@ -63,6 +63,19 @@ class GraphState(TypedDict, total=False):
     steps: Annotated[list[dict[str, Any]], operator.add]
 
 
+def asset_by_role(state: "GraphState", *roles: str) -> dict[str, Any] | None:
+    """The first bound asset carrying any of `roles`, in the order given.
+
+    The validator has already checked the roles a task needs, so a None here
+    means something changed underneath the graph rather than a bad request.
+    """
+    for role in roles:
+        for asset in state.get("assets", []):
+            if asset.get("role") == role:
+                return asset
+    return None
+
+
 def elapsed_ms(started: float) -> int:
     """Milliseconds since a `time.perf_counter()` mark."""
     return int((time.perf_counter() - started) * 1000)

@@ -21,7 +21,7 @@ raised as errors.
 
 ```
 intake -> intent_classifier -> input_validator -> task_router
-       -> vqa_grounding_node | specialist_stub
+       -> vqa_grounding_node | change_node | fusion_node
        -> output_combiner -> trace_logger
 ```
 
@@ -31,8 +31,10 @@ intake -> intent_classifier -> input_validator -> task_router
 | `intent_classifier` | Labels the question with an LLM over OpenRouter |
 | `input_validator` | Checks the bound imagery can answer that intent |
 | `task_router` | Maps intent to task and pulls the model off the registry |
-| `vqa_grounding_node` | Runs zero-shot GeoChat — the one real specialist today |
-| `specialist_stub` | Stands in for change detection and fusion until Phase 4 |
+| `vqa_grounding_node` | Runs zero-shot LLaVA-1.5 for VQA and captioning |
+| `change_node` | Diffs a bi-temporal pair and describes what moved |
+| `fusion_node` | Encodes an optical+SAR pair, fuses it, and answers from both |
+| `specialist_stub` | Unreachable today — the landing place for a task added to the enum before its node exists |
 | `output_combiner` | Settles `{answer, evidence, confidence, model_used}` |
 | `trace_logger` | Writes the run to `execution_traces` |
 
@@ -45,10 +47,22 @@ A run reports one of four statuses, and only `ok` carries an answer:
 `rejected` (the imagery does not match the question), `unavailable` (the model
 could not be loaded here), `failed` (a node raised).
 
+**Dispatch reads the query and the imagery.** The classifier labels the
+question, and then `reconcile_with_upload` checks that label against what is
+actually bound. Two of the three upload modes admit exactly one intent — a
+bi-temporal pair can only be compared over time, an optical+SAR pair can only be
+fused — so a label those rule out is corrected rather than left to be rejected,
+and the trace records the swap. Single-image mode admits two intents, so it
+never triggers: a change question asked of one image is a real mismatch, and the
+validator still says so.
+
 **Intents.** The classifier picks one of `single_image_vqa`,
-`single_image_grounding`, `change_vqa` or `optical_sar_fusion`. Both
-single-image intents run on the same checkpoint — grounding differs in the
-prompt, not the model. Set `SATQUERY_OPENROUTER_API_KEY` to use an LLM;
+`single_image_captioning`, `change_vqa` or `optical_sar_fusion`. Both
+single-image intents run on the same checkpoint — captioning differs in the
+prompt, not the model: `single_image_vqa` answers a pointed question, and
+`single_image_captioning` widens the scope to the whole scene via
+`CAPTION_SUFFIX` in `app/agent/nodes/vqa.py`. The split is scope, not subject.
+Set `SATQUERY_OPENROUTER_API_KEY` to use an LLM;
 `SATQUERY_OPENROUTER_MODEL` selects DeepSeek or Gemini. Without a key the
 controller falls back to keyword classification and says so in the trace.
 
@@ -65,9 +79,14 @@ Task names are shared across all three layers — the YAML keys, the Pydantic
 
 | Task | What it does |
 | --- | --- |
-| `vqa_grounding` | Answers questions about one scene and localises what it names |
-| `change_detection` | Compares two captures of one footprint |
+| `vqa_grounding` | Answers questions about one scene, and captions it |
+| `change_detection` | Compares two captures of one footprint and masks what changed |
 | `optical_sar_fusion` | Combines an optical scene with SAR when cloud blocks the optical |
+
+All three return the same object — `{answer, evidence, confidence, model_used}` —
+so the combiner, the API and the canvas never branch on which one ran. What
+varies is the evidence: boxes for VQA, masks for change detection, none for
+fusion, which produces a described scene rather than geometry.
 
 ## Frontend
 
@@ -125,9 +144,94 @@ loader resolve to a `MockModel`. Constructing the engine is cheap — no weights
 are touched until the first question — so the service starts anywhere and
 reports a missing GPU only when someone actually asks something.
 
-**Running a small model locally.** GeoChat-7B in 4-bit needs a CUDA GPU. To
-exercise the whole path without one, point the registry at any LLaVA-family
-checkpoint:
+**The VQA checkpoint.** The zero-shot base is `llava-hf/llava-1.5-7b-hf`,
+loaded through transformers' generic LLaVA classes (`_load_llava` in
+`app/models/geochat.py`). One checkpoint serves both single-image intents:
+`single_image_vqa` asks it a pointed question, `single_image_captioning` asks it
+to describe the whole scene. LLaVA-1.5 captions natively, which is why
+captioning — not grounding — is the second mandatory single-image task.
+
+The engine keeps a second loader path, `--loader geochat`, for GeoChat-format
+checkpoints — a fine-tuned adapter, say — and picks it automatically when the
+`geochat` package is importable. Nothing in the code is GeoChat-specific beyond
+that path and the grounding-token parser.
+
+*Why not GeoChat itself.* GeoChat is a LLaVA-1.5 derivative and would be the
+better remote-sensing base, but `MBZUAI/geochat-7B` is not usable here today:
+its official repo pins a 2023-era dependency stack (torch 2.0.1, transformers
+4.31.0) that conflicts with everything else this project runs on, and its
+published weights do not load correctly through transformers' generic LLaVA
+classes — the checkpoint layout does not match that architecture. Stock
+LLaVA-1.5 loads cleanly on the modern stack, so it is the working base until a
+GeoChat-format checkpoint arrives in a form the current environment can load.
+
+*On grounding.* The problem statement asks for captioning **or** grounding
+alongside VQA, and this project answers with captioning. Region grounding would
+need a grounding-trained checkpoint of its own — LLaVA-1.5 was never trained to
+emit the `{<x1><y1><x2><y2>}` box tokens `parse_grounding` reads, so it returns
+prose and an empty `evidence` list. Adding it later is a checkpoint swap, not a
+rewrite: point `vqa_grounding.base_model` at something like
+`RogerFerrod/GroundSet-LLaVA-1.6-7B`, restore a `single_image_grounding` intent,
+and the parser, the `evidence` field and the canvas overlay layer are already
+wired to draw the boxes. That is a possible addition once the core requirements
+are complete, not part of them.
+
+The task key stays named `vqa_grounding` so the YAML, the `TaskType` enum and
+the frontend's `TaskType` union keep matching; only the intent taxonomy changed.
+
+### Change detection
+
+A prompted diff, and one checkpoint does both halves:
+
+- **Where.** Both frames go through the VQA model's own vision tower. Patch
+  embeddings are compared cosine-wise, giving a difference map on the encoder's
+  patch grid (24x24 for LLaVA-1.5's CLIP ViT-L/14-336). Cells above
+  `diff_threshold` are grouped into connected regions, and each region becomes
+  one `mask` overlay — its bounding rectangle in 0-1 scene space, with the mean
+  difference score as its confidence. A rectangle rather than a traced contour
+  on purpose: the grid is coarse, and a pixel-accurate outline would imply
+  precision the features do not carry. Regions below `min_region_area` are
+  dropped as speckle.
+- **What.** Both frames then go to the VQA model with a change-focused
+  instruction, and a change-VQA question is appended after it so "did the pier
+  get longer?" is answered rather than replaced by a generic summary.
+
+No second checkpoint, so changing `base_model` changes the detector and the
+describer together. The honest caveat: LLaVA-1.5 was trained on single images.
+It accepts two and answers, but its comparison is weaker than a model trained on
+pairs. The difference map does not depend on that — the vision tower is applied
+to each frame separately.
+
+### Optical-SAR fusion
+
+Encode, fuse, verbalise, answer:
+
+1. One SSL4EO-S12 (or DeCUR) encoder embeds both the optical scene and the SAR
+   capture. Those pretraining schemes align the two modalities in a shared
+   space, which is what makes step 3 mean anything.
+2. The embeddings are fused — `fusion_strategy: concat` by default, since it
+   loses nothing and needs no learned head. `gated` weights each modality by its
+   share of the magnitude; `cross_attention` needs a trained head and is
+   rejected rather than silently approximated.
+3. The fused vector is reduced to a few interpretable numbers — which sensor
+   dominates, whether the two agree — and rendered as one sentence using the
+   phrases in `feature_vocabulary`. This is the join between a vector nobody can
+   read and a model that only reads text, and it is deliberately a small
+   inspectable mapping rather than a learned captioner: **every phrase the VQA
+   model is told comes from the YAML**, so a claim the imagery cannot support
+   cannot appear without someone writing it there.
+4. That sentence goes to the VQA model alongside the optical image and the
+   question. The sentence is also surfaced in the result panel — it is half the
+   reasoning, so hiding it would make the answer harder to check.
+
+The encoder is the one part that needs real weights. Until `checkpoint_path`
+points at some, the node reports itself unavailable: an SSL4EO-S12 architecture
+with random weights would still produce an embedding, and that embedding would
+still yield a confident-sounding sentence. Dropping real weights in is a path in
+`model_config.yaml` and nothing else.
+
+**Running it locally.** LLaVA-1.5-7B in 4-bit needs a CUDA GPU. To exercise the
+whole path without one, run unquantized on CPU:
 
 ```yaml
 # model_config.local.yaml
@@ -141,10 +245,24 @@ vqa_grounding:
 SATQUERY_MODEL_CONFIG_PATH=./model_config.local.yaml uvicorn app.main:app --reload
 ```
 
+## Tests
+
+```bash
+python backend/tests/test_cpu_smoke.py      # graph paths, upload validation, routing
+python backend/tests/test_specialists.py    # change detection, fusion, dispatch
+```
+
+CPU only, and dependency-free beyond what the app already needs — no GPU, no
+MongoDB, no OpenRouter key, no network, no weights. Engines are exercised
+through their pure parts (the difference map, the fusion arithmetic, the
+verbalisation) and the nodes against recording stubs registered on the model
+registry, which is the same seam real checkpoints arrive through. Both files
+also run under `pytest backend/tests` if you have it installed.
+
 ## Zero-shot inference test
 
-Confirms GeoChat runs in 4-bit before any of it is wired into the backend.
-Needs a CUDA GPU: bitsandbytes has no 4-bit kernel for CPU or MPS.
+Confirms the VQA checkpoint runs in 4-bit before any of it is wired into the
+backend. Needs a CUDA GPU: bitsandbytes has no 4-bit kernel for CPU or MPS.
 
 ```bash
 pip install -r scripts/requirements.txt
@@ -153,9 +271,11 @@ python scripts/test_geochat_zeroshot.py \
   --question "How many aircraft are visible on the tarmac?"
 ```
 
-It prefers the official `geochat` package when it is importable and otherwise
-falls back to transformers' generic LLaVA classes, which load the same weights
-for plain VQA. Force either path with `--loader geochat|llava`.
+It defaults to `llava-hf/llava-1.5-7b-hf` and takes any LLaVA-compatible
+checkpoint via `--model`. `--loader` picks the code path: `llava` for
+transformers' generic LLaVA classes, `geochat` for the official `geochat`
+package, `auto` (the default) for `geochat` when it is importable and `llava`
+otherwise.
 
 The script and the controller share one implementation, `app/models/geochat.py`,
 so what this verifies is what the graph runs. Both return the same shape:
@@ -166,6 +286,7 @@ so what this verifies is what the graph runs. Both return the same shape:
 
 `confidence` is the mean probability of the tokens the model chose — a
 generative VQA model has no calibrated confidence head, so this is the honest
-stand-in. `evidence` holds GeoChat's grounding boxes, parsed out of its
+stand-in. `evidence` holds grounding boxes parsed out of
 `{<x1><y1><x2><y2>|<angle>}` output tokens and normalised to 0–1 of the scene
-extent, which is what the canvas draws.
+extent, which is what the canvas draws — empty under stock LLaVA-1.5, which
+does not emit them, and populated for a GeoChat-format checkpoint.

@@ -4,17 +4,59 @@
 # `ModelRegistry.get_model(task_name)`. Specialist model nodes are dropped in
 # later by pointing these entries at real checkpoints; the schema stays fixed.
 
+# Serves both single-image intents: single_image_vqa (a pointed question) and
+# single_image_captioning (describe the whole scene). One checkpoint, two
+# prompts — see CAPTION_SUFFIX in app/agent/nodes/vqa.py. The key keeps its
+# `vqa_grounding` name so the YAML, the TaskType enum and the frontend union
+# stay in lockstep; grounding itself is not a supported intent today.
 vqa_grounding:
-  base_model: MBZUAI/geochat-7B
-  adapter_path: ./weights/adapters/geochat-lora-rsvqa
+  # Zero-shot base. GeoChat's official checkpoint needs a 2023-era stack
+  # (torch 2.0.1 / transformers 4.31.0) and does not load through transformers'
+  # generic LLaVA classes, so stock LLaVA-1.5 is the working base today. It
+  # captions natively, which is why captioning is the second single-image task.
+  # `app/models/geochat.py` still carries a `geochat` loader path for a
+  # GeoChat-format checkpoint if one is added later; region grounding would
+  # need a grounding-trained checkpoint of its own (e.g.
+  # RogerFerrod/GroundSet-LLaVA-1.6-7B) — a possible later addition.
+  base_model: llava-hf/llava-1.5-7b-hf
+  # adapter_path is reported in `model_used`, not loaded — leave it unset until
+  # a fine-tuned adapter actually exists, e.g.:
+  # adapter_path: ./weights/adapters/geochat-lora-rsvqa
+  adapter_path: null
   quantization: 4bit          # one of: none | 8bit | 4bit
   device: cuda:0              # one of: cpu | cuda | cuda:N | mps
 
+# Prompted diff: the VQA model's own vision tower supplies the patch features
+# that locate the change, and the VQA model then describes it from both frames.
+# No second checkpoint — swapping base_model swaps both halves at once.
 change_detection:
-  method: siamese_diff        # one of: siamese_diff | image_diff | cva
-  diff_backbone: resnet50
+  method: prompted_diff       # one of: prompted_diff | siamese_diff | image_diff | cva
+  base_model: llava-hf/llava-1.5-7b-hf
+  quantization: 4bit          # one of: none | 8bit | 4bit
+  device: cuda:0
+  # Patch-feature cosine distance above this counts as changed. Raise it to
+  # report only the strongest differences.
+  diff_threshold: 0.35
+  # Changed cells smaller than this fraction of the scene are dropped as noise.
+  min_region_area: 0.01
+  max_regions: 8
 
+# Two encoders, one per modality, fused and then verbalised for the VQA model.
+# Real SSL4EO-S12 or DeCUR weights drop in at checkpoint_path without a code
+# change; until then the node reports itself unavailable rather than guessing.
 optical_sar_fusion:
-  encoder: vit_base_patch16_224
-  checkpoint_path: ./weights/fusion/opt_sar_vitb16.pth
-  fusion_strategy: cross_attention   # one of: concat | cross_attention | gated
+  encoder: ssl4eo_s12_vit_base_patch16_224   # timm-style id, or a DeCUR variant
+  checkpoint_path: ./weights/fusion/ssl4eo_s12_vitb16.pth
+  fusion_strategy: concat            # one of: concat | cross_attention | gated
+  device: cuda:0
+  base_model: llava-hf/llava-1.5-7b-hf
+  # The fused embedding is summarised through these bands before it reaches the
+  # VQA model. Editing the wording here changes what the model is told, so keep
+  # each phrase to something the imagery could actually support.
+  feature_vocabulary:
+    sar_high: "strong radar backscatter, consistent with metal, buildings or ships"
+    sar_low: "weak radar backscatter, consistent with calm water or smooth ground"
+    optical_high: "high optical contrast and texture"
+    optical_low: "flat, low-contrast optical response, consistent with cloud or water"
+    agree: "both sensors describe the same structure"
+    disagree: "the sensors disagree, so the optical view is likely obscured"

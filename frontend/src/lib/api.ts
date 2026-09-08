@@ -3,7 +3,7 @@
  *
  * Two ways to run a query: `runQuery` waits for the whole thing, `streamQuery`
  * reports each controller step as it lands. The console uses the streaming one
- * so the trace fills in while GeoChat loads and decodes.
+ * so the trace fills in while the VQA model loads and decodes.
  */
 
 import type {

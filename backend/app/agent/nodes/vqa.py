@@ -14,9 +14,13 @@ from app.models.schemas import Intent, QueryStatus, TraceStepStatus
 
 logger = logging.getLogger(__name__)
 
-#: Appended for grounding intents. GeoChat emits {<x1><y1><x2><y2>|<angle>}
-#: tokens when the prompt asks it to; the engine parses them into overlays.
-GROUNDING_SUFFIX = " Give the bounding box of each object you mention."
+#: Appended for captioning intents. Same checkpoint as single-image VQA — the
+#: two intents differ in the prompt, not the model. LLaVA-1.5 captions natively,
+#: so this only widens the scope of the answer from one fact to the whole scene.
+CAPTION_SUFFIX = (
+    " Describe the whole scene: the main objects and how many, the land cover, "
+    "and how they are laid out."
+)
 
 
 def _primary_asset(state: GraphState) -> dict[str, Any]:
@@ -35,8 +39,8 @@ async def vqa_grounding_node(state: GraphState) -> dict[str, Any]:
 
     asset = _primary_asset(state)
     question = state["query"]
-    if state.get("intent") is Intent.SINGLE_IMAGE_GROUNDING:
-        question = f"{question.rstrip()}{GROUNDING_SUFFIX}"
+    if state.get("intent") is Intent.SINGLE_IMAGE_CAPTIONING:
+        question = f"{question.rstrip()}{CAPTION_SUFFIX}"
 
     engine = get_registry().get_model("vqa_grounding")
     started = time.perf_counter()
@@ -51,20 +55,20 @@ async def vqa_grounding_node(state: GraphState) -> dict[str, Any]:
             temperature=state.get("parameters", {}).get("temperature"),
         )
     except ModelUnavailable as exc:
-        logger.info("geochat unavailable: %s", exc)
+        logger.info("vqa model unavailable: %s", exc)
         return {
             "status": QueryStatus.UNAVAILABLE,
             "error": str(exc),
             "model_used": getattr(engine, "model_used", "vqa_grounding"),
-            "steps": [step("Run GeoChat", TraceStepStatus.FAILED, str(exc), elapsed_ms(started))],
+            "steps": [step("Run VQA model", TraceStepStatus.FAILED, str(exc), elapsed_ms(started))],
         }
     except Exception as exc:  # noqa: BLE001 - one bad inference must not kill the graph
-        logger.exception("geochat inference failed")
+        logger.exception("vqa inference failed")
         return {
             "status": QueryStatus.FAILED,
             "error": f"Inference failed: {exc}",
             "model_used": getattr(engine, "model_used", "vqa_grounding"),
-            "steps": [step("Run GeoChat", TraceStepStatus.FAILED, str(exc)[:200], elapsed_ms(started))],
+            "steps": [step("Run VQA model", TraceStepStatus.FAILED, str(exc)[:200], elapsed_ms(started))],
         }
 
     duration_ms = result.get("duration_ms") or int((time.perf_counter() - started) * 1000)
@@ -83,7 +87,7 @@ async def vqa_grounding_node(state: GraphState) -> dict[str, Any]:
         "metrics": metrics,
         "steps": [
             step(
-                "Run GeoChat",
+                "Run VQA model",
                 TraceStepStatus.COMPLETE,
                 f"{result.get('tokens', 0)} tokens, {len(evidence)} box(es)",
                 duration_ms,

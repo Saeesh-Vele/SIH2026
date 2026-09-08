@@ -13,6 +13,26 @@ from app.models.schemas import INTENT_TO_TASK, QueryStatus, TaskType, TraceStepS
 
 logger = logging.getLogger(__name__)
 
+#: Which node runs each task. A task absent here falls through to
+#: `specialist_stub`, which reports it as unwired rather than pretending.
+TASK_NODES: dict[TaskType, str] = {
+    TaskType.VQA_GROUNDING: "vqa_grounding_node",
+    TaskType.CHANGE_DETECTION: "change_node",
+    TaskType.OPTICAL_SAR_FUSION: "fusion_node",
+}
+
+
+def _config_summary(config: dict[str, Any]) -> str:
+    """The one field of a task's config worth putting in the trace.
+
+    Encoder first: fusion carries both an encoder and a VQA base_model, and the
+    encoder is the half that distinguishes it.
+    """
+    for key in ("encoder", "base_model", "method"):
+        if config.get(key):
+            return str(config[key])
+    return "no checkpoint configured"
+
 
 async def task_router(state: GraphState) -> dict[str, Any]:
     started = time.perf_counter()
@@ -54,7 +74,7 @@ async def task_router(state: GraphState) -> dict[str, Any]:
             step(
                 "Route task",
                 TraceStepStatus.COMPLETE,
-                f"{intent.value} -> {task.value} ({config.get('base_model') or config.get('method') or config.get('encoder')})",
+                f"{intent.value} -> {task.value} ({_config_summary(config)})",
                 elapsed_ms(started),
             )
         ],
@@ -64,16 +84,14 @@ async def task_router(state: GraphState) -> dict[str, Any]:
 def route_to_specialist(state: GraphState) -> str:
     """Conditional edge out of task_router.
 
-    Anything that already failed skips inference. Only vqa_grounding has a real
-    node today; the rest land on the stub until their Phase 4 implementations
-    arrive.
+    Anything that already failed skips inference. Every task in TASK_NODES has a
+    real node; the stub stays as the landing place for one added to the enum
+    before its node exists.
     """
     status = state.get("status")
     if status is not None and status != QueryStatus.OK:
         return "output_combiner"
-    if state.get("task") is TaskType.VQA_GROUNDING:
-        return "vqa_grounding_node"
-    return "specialist_stub"
+    return TASK_NODES.get(state.get("task"), "specialist_stub")
 
 
 def route_after_validation(state: GraphState) -> str:

@@ -30,20 +30,33 @@ Reply with JSON only, no prose, no code fence:
 {"intent": "<label>", "confidence": <0-1>, "reason": "<max 12 words>"}
 
 Labels:
-- single_image_vqa: a question about the content of one image (counts, presence,
-  attributes, description) that does not need the object's location marked.
-- single_image_grounding: asks where something is in one image, or to locate,
-  point out, mark, outline or box an object.
+- single_image_vqa: a specific question about one image - counts, presence,
+  attributes, comparisons, yes/no. Expects a short factual answer about
+  something the asker already named.
+- single_image_captioning: asks for an overall description, caption, summary or
+  overview of one image as a whole - "describe this image", "what's visible
+  here", "what does this scene show", "tell me about this area". Nothing
+  specific is named; the answer is a description of the scene.
 - change_vqa: compares two captures of the same place over time - what changed,
   what was added or removed, growth, before/after.
 - optical_sar_fusion: involves SAR or radar data, or asks to see through cloud,
   haze or darkness by combining an optical image with a radar one.
 
+The split between the two single-image labels is scope, not subject: a pointed
+question about one thing is single_image_vqa, a request to describe the whole
+scene is single_image_captioning.
+
 Pick the single best label. If the question is ambiguous, prefer single_image_vqa."""
 
-_GROUNDING_WORDS = (
-    "where", "locate", "location", "mark", "outline", "box", "bounding",
-    "point out", "highlight", "show me the", "pinpoint", "segment",
+#: Phrases that ask for the whole scene rather than one thing in it. Kept as
+#: phrases, not bare words, so "how many aircraft are visible" stays a VQA
+#: question rather than tripping on "visible".
+_CAPTION_WORDS = (
+    "describe", "description", "caption", "summarise", "summarize", "summary",
+    "overview", "what is visible", "what's visible", "what can you see",
+    "what does this show", "what does this image show", "what does this scene show",
+    "tell me about", "what is in this", "what's in this", "characterise",
+    "characterize",
 )
 _CHANGE_WORDS = (
     "change", "changed", "before", "after", "temporal", "difference", "since",
@@ -73,9 +86,9 @@ def classify_heuristic(query: str) -> IntentDecision:
         return IntentDecision(Intent.OPTICAL_SAR_FUSION, 0.5, "radar or cloud keyword", "heuristic")
     if any(word in lowered for word in _CHANGE_WORDS):
         return IntentDecision(Intent.CHANGE_VQA, 0.5, "temporal comparison keyword", "heuristic")
-    if any(word in lowered for word in _GROUNDING_WORDS):
+    if any(word in lowered for word in _CAPTION_WORDS):
         return IntentDecision(
-            Intent.SINGLE_IMAGE_GROUNDING, 0.5, "localisation keyword", "heuristic"
+            Intent.SINGLE_IMAGE_CAPTIONING, 0.5, "scene-description keyword", "heuristic"
         )
     return IntentDecision(Intent.SINGLE_IMAGE_VQA, 0.4, "no specialist keyword", "heuristic")
 

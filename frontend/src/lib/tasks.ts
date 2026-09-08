@@ -1,7 +1,7 @@
 import type { TaskType, UploadMode } from "./types";
 
 export const TASK_LABELS: Record<TaskType, string> = {
-  vqa_grounding: "VQA + grounding",
+  vqa_grounding: "VQA + captioning",
   change_detection: "Change detection",
   optical_sar_fusion: "Optical–SAR fusion",
 };

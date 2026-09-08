@@ -1,7 +1,7 @@
 """The SatQuery controller graph.
 
     intake -> intent_classifier -> input_validator -> task_router
-           -> vqa_grounding_node | specialist_stub
+           -> vqa_grounding_node | change_node | fusion_node | specialist_stub
            -> output_combiner -> trace_logger
 
 Two conditional edges short-circuit inference: a rejected input skips straight
@@ -18,27 +18,49 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.nodes.change import change_node
 from app.agent.nodes.combiner import output_combiner
+from app.agent.nodes.fusion import fusion_node
 from app.agent.nodes.intake import intake
 from app.agent.nodes.intent import intent_classifier
-from app.agent.nodes.router import route_after_validation, route_to_specialist, task_router
+from app.agent.nodes.router import (
+    TASK_NODES,
+    route_after_validation,
+    route_to_specialist,
+    task_router,
+)
 from app.agent.nodes.tracelog import trace_logger
 from app.agent.nodes.validator import input_validator
 from app.agent.nodes.vqa import specialist_stub, vqa_grounding_node
 from app.agent.state import GraphState
-from app.models.schemas import Intent, QueryStatus
+from app.models.schemas import Intent, QueryStatus, TaskType
 
-#: Node names, in the order they appear in a nominal run. Exposed so the API can
-#: tell a client what is coming before anything has run.
-NODE_SEQUENCE = (
-    "intake",
-    "intent_classifier",
-    "input_validator",
-    "task_router",
-    "vqa_grounding_node",
-    "output_combiner",
-    "trace_logger",
-)
+#: Every node task_router can hand off to. Exactly one runs per request.
+SPECIALIST_NODES = ("vqa_grounding_node", "change_node", "fusion_node", "specialist_stub")
+
+
+def node_sequence(task: TaskType | None = None) -> tuple[str, ...]:
+    """Node names in the order a run of `task` will visit them.
+
+    The API sends this as the plan before anything has run, so with no task yet
+    classified it names the single-image path — the most common one — and the
+    trace corrects it as the real steps land.
+    """
+    specialist = TASK_NODES.get(task, "vqa_grounding_node")
+    return (
+        "intake",
+        "intent_classifier",
+        "input_validator",
+        "task_router",
+        specialist,
+        "output_combiner",
+        "trace_logger",
+    )
+
+
+#: The nominal single-image path. Kept as a module constant for callers that
+#: want the default plan without deciding on a task first.
+NODE_SEQUENCE = node_sequence()
 
 
 def build_graph():
@@ -49,6 +71,8 @@ def build_graph():
     graph.add_node("input_validator", input_validator)
     graph.add_node("task_router", task_router)
     graph.add_node("vqa_grounding_node", vqa_grounding_node)
+    graph.add_node("change_node", change_node)
+    graph.add_node("fusion_node", fusion_node)
     graph.add_node("specialist_stub", specialist_stub)
     graph.add_node("output_combiner", output_combiner)
     graph.add_node("trace_logger", trace_logger)
@@ -65,15 +89,11 @@ def build_graph():
     graph.add_conditional_edges(
         "task_router",
         route_to_specialist,
-        {
-            "vqa_grounding_node": "vqa_grounding_node",
-            "specialist_stub": "specialist_stub",
-            "output_combiner": "output_combiner",
-        },
+        {**{name: name for name in SPECIALIST_NODES}, "output_combiner": "output_combiner"},
     )
 
-    graph.add_edge("vqa_grounding_node", "output_combiner")
-    graph.add_edge("specialist_stub", "output_combiner")
+    for name in SPECIALIST_NODES:
+        graph.add_edge(name, "output_combiner")
     graph.add_edge("output_combiner", "trace_logger")
     graph.add_edge("trace_logger", END)
 

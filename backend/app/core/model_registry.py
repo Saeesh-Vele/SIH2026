@@ -104,21 +104,48 @@ class ModelRegistry:
 
 
 def _load_geochat(task_name: TaskName, config: dict[str, Any]) -> Any:
-    """Build the GeoChat engine for `vqa_grounding`.
+    """Build the VQA engine for `vqa_grounding`.
 
-    Constructing it is cheap — no weights are touched until the first `infer`
-    call — so a machine that can never load the checkpoint still starts, and
-    fails with a readable reason only when someone actually asks a question.
+    The checkpoint comes from `model_config.yaml` — stock LLaVA-1.5 today; the
+    engine also carries a loader path for GeoChat-format weights. Constructing
+    it is cheap — no weights are touched until the first `infer` call — so a
+    machine that can never load the checkpoint still starts, and fails with a
+    readable reason only when someone actually asks a question.
     """
     from app.models.geochat import GeoChatConfig, GeoChatEngine
 
     return GeoChatEngine(GeoChatConfig.from_mapping(config))
 
 
+def _load_change(task_name: TaskName, config: dict[str, Any]) -> Any:
+    """Build the prompted-diff change detector for `change_detection`.
+
+    Shares the VQA checkpoint — the vision tower locates the change and the
+    language head describes it — so this costs no second set of weights.
+    """
+    from app.models.change import ChangeConfig, ChangeDetectorEngine
+
+    return ChangeDetectorEngine(ChangeConfig.from_mapping(config))
+
+
+def _load_fusion(task_name: TaskName, config: dict[str, Any]) -> Any:
+    """Build the optical-SAR fusion engine for `optical_sar_fusion`.
+
+    Constructing it never touches the encoder weights, so a machine without
+    SSL4EO-S12 or DeCUR checkpoints still starts and reports the task
+    unavailable only when someone asks a fusion question.
+    """
+    from app.models.fusion import FusionConfig, FusionEngine
+
+    return FusionEngine(FusionConfig.from_mapping(config))
+
+
 #: Loaders for tasks that have a real implementation. Anything absent here
-#: resolves to a MockModel, which is how Phase 4 specialists get dropped in.
+#: resolves to a MockModel, which is how a further specialist gets dropped in.
 DEFAULT_LOADERS: dict[TaskName, ModelLoader] = {
     "vqa_grounding": _load_geochat,
+    "change_detection": _load_change,
+    "optical_sar_fusion": _load_fusion,
 }
 
 

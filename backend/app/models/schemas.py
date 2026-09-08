@@ -29,7 +29,7 @@ class Intent(str, Enum):
     """
 
     SINGLE_IMAGE_VQA = "single_image_vqa"
-    SINGLE_IMAGE_GROUNDING = "single_image_grounding"
+    SINGLE_IMAGE_CAPTIONING = "single_image_captioning"
     CHANGE_VQA = "change_vqa"
     OPTICAL_SAR_FUSION = "optical_sar_fusion"
 
@@ -40,11 +40,12 @@ class UploadMode(str, Enum):
     BI_TEMPORAL = "bi_temporal"      # t0 + t1
 
 
-#: Which model a given intent needs. Both single-image intents run on the same
-#: grounded VQA model; grounding differs in the prompt, not the checkpoint.
+#: Which model a given intent needs. Both single-image intents — a pointed
+#: question and a whole-scene caption — run on the same VQA checkpoint; they
+#: differ in the prompt, not the model.
 INTENT_TO_TASK: dict[Intent, TaskType] = {
     Intent.SINGLE_IMAGE_VQA: TaskType.VQA_GROUNDING,
-    Intent.SINGLE_IMAGE_GROUNDING: TaskType.VQA_GROUNDING,
+    Intent.SINGLE_IMAGE_CAPTIONING: TaskType.VQA_GROUNDING,
     Intent.CHANGE_VQA: TaskType.CHANGE_DETECTION,
     Intent.OPTICAL_SAR_FUSION: TaskType.OPTICAL_SAR_FUSION,
 }
@@ -52,9 +53,19 @@ INTENT_TO_TASK: dict[Intent, TaskType] = {
 #: The upload modes each intent can work from.
 INTENT_TO_MODES: dict[Intent, tuple["UploadMode", ...]] = {
     Intent.SINGLE_IMAGE_VQA: (UploadMode.SINGLE,),
-    Intent.SINGLE_IMAGE_GROUNDING: (UploadMode.SINGLE,),
+    Intent.SINGLE_IMAGE_CAPTIONING: (UploadMode.SINGLE,),
     Intent.CHANGE_VQA: (UploadMode.BI_TEMPORAL,),
     Intent.OPTICAL_SAR_FUSION: (UploadMode.CROSS_MODAL,),
+}
+
+
+#: Which intents a given upload mode can serve — INTENT_TO_MODES, inverted.
+#: A mode with exactly one intent determines the task on its own, which is what
+#: lets the classifier correct an obviously wrong label. Derived rather than
+#: written out so the two cannot fall out of step.
+MODE_TO_INTENTS: dict[UploadMode, tuple[Intent, ...]] = {
+    mode: tuple(i for i, modes in INTENT_TO_MODES.items() if mode in modes)
+    for mode in UploadMode
 }
 
 

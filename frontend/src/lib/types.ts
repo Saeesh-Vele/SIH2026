@@ -4,7 +4,7 @@ export type TaskType = "vqa_grounding" | "change_detection" | "optical_sar_fusio
 /** What the classifier decided the question is asking for. Mirrors app.models.schemas.Intent. */
 export type Intent =
   | "single_image_vqa"
-  | "single_image_grounding"
+  | "single_image_captioning"
   | "change_vqa"
   | "optical_sar_fusion";
 
@@ -45,6 +45,8 @@ export interface MaskOverlay {
   label: string;
   confidence: number;
   polygon: [number, number][];
+  /** Share of the scene the region covers, 0–1. Set by change detection. */
+  area?: number;
 }
 
 export type Overlay = BoxOverlay | MaskOverlay;

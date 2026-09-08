@@ -1,13 +1,18 @@
-"""Zero-shot GeoChat inference.
+"""Zero-shot LLaVA-family VQA inference.
 
 The single implementation behind both `scripts/test_geochat_zeroshot.py` and the
 graph's VQA node. Heavy imports (torch, transformers) stay inside `load()` so
 importing this module costs nothing on a machine that will never run inference.
 
-GeoChat is a LLaVA-1.5 derivative. Its official repo ships a custom
-`GeoChatLlamaForCausalLM`; when that package is importable we use it, and
-otherwise fall back to transformers' generic LLaVA classes, which load the same
-weights for plain VQA.
+The working base today is stock LLaVA-1.5 (`llava-hf/llava-1.5-7b-hf`), loaded
+through transformers' generic LLaVA classes. GeoChat is a LLaVA-1.5 derivative
+and would be the better base for remote sensing, but its official checkpoint
+does not load through those generic classes, and its repo's custom
+`GeoChatLlamaForCausalLM` requires a 2023-era dependency stack (torch 2.0.1,
+transformers 4.31.0) that this project cannot pin. The `geochat` loader path
+below is kept for a GeoChat-format checkpoint if one is added later — e.g. a
+fine-tuned adapter — and is used automatically when the `geochat` package is
+importable.
 """
 
 from __future__ import annotations
@@ -21,9 +26,13 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "MBZUAI/geochat-7B"
+DEFAULT_MODEL = "llava-hf/llava-1.5-7b-hf"
 
-# GeoChat inherits LLaVA-1.5's vicuna_v1 conversation format.
+#: A GeoChat-format checkpoint, for the `geochat` loader path. Not the default:
+#: it needs the official `geochat` package and its 2023-era dependency stack.
+GEOCHAT_MODEL = "MBZUAI/geochat-7B"
+
+# LLaVA-1.5 — and GeoChat, which derives from it — use the vicuna_v1 format.
 VICUNA_SYSTEM = (
     "A chat between a curious human and an artificial intelligence assistant. "
     "The assistant gives helpful, detailed, and polite answers to the human's questions."
@@ -74,11 +83,15 @@ def build_prompt(question: str) -> str:
 
 
 def parse_grounding(text: str) -> list[dict[str, Any]]:
-    """Pull GeoChat's grounding boxes out of an answer.
+    """Pull GeoChat-format grounding boxes out of an answer.
 
     Returns boxes normalised to 0-1 of the scene extent, the shape the canvas
     draws. Angles are kept when present — GeoChat emits oriented boxes for
     rotated objects such as aircraft and ships.
+
+    Stock LLaVA-1.5, the current base, was not trained to emit these tokens, so
+    this returns an empty list for it. It stays in the path for a GeoChat-format
+    checkpoint added later.
     """
     boxes: list[dict[str, Any]] = []
     for i, match in enumerate(_BOX_RE.finditer(text)):
@@ -108,7 +121,11 @@ def strip_grounding(text: str) -> str:
 
 
 class GeoChatEngine:
-    """Loads a GeoChat checkpoint once and answers questions about one image."""
+    """Loads a LLaVA-family checkpoint once and answers questions about one image.
+
+    Named for the `geochat` loader path it still supports; the default
+    checkpoint is stock LLaVA-1.5.
+    """
 
     def __init__(self, config: GeoChatConfig, loader: Literal["auto", "geochat", "llava"] = "auto"):
         self.config = config
@@ -199,13 +216,18 @@ class GeoChatEngine:
             raise ModelUnavailable(f"could not load {self.config.base_model}: {exc}") from exc
 
         logger.info(
-            "geochat loaded via %s in %.1fs",
+            "%s loaded via %s loader in %.1fs",
+            self.config.base_model,
             "geochat" if use_geochat else "llava",
             time.perf_counter() - started,
         )
 
     def _load_geochat(self) -> None:
-        """Official GeoChat path — requires the `geochat` package on PYTHONPATH."""
+        """Official GeoChat path — requires the `geochat` package on PYTHONPATH.
+
+        Unused by default: the package pins torch 2.0.1 / transformers 4.31.0.
+        Kept for a GeoChat-format checkpoint added later.
+        """
         from geochat.mm_utils import get_model_name_from_path  # type: ignore
         from geochat.model.builder import load_pretrained_model  # type: ignore
 
@@ -221,7 +243,12 @@ class GeoChatEngine:
         self._tokenizer, self._model, self._image_processor = tokenizer, model, image_processor
 
     def _load_llava(self) -> None:
-        """Fallback using transformers' generic LLaVA classes."""
+        """Default path — transformers' generic LLaVA classes.
+
+        Loads any LLaVA-compatible checkpoint, `llava-hf/llava-1.5-7b-hf`
+        included. It will not load GeoChat's official weights, whose layout the
+        generic classes do not match.
+        """
         from transformers import AutoProcessor, LlavaForConditionalGeneration
 
         self._processor = AutoProcessor.from_pretrained(self.config.base_model)
@@ -240,11 +267,16 @@ class GeoChatEngine:
         *,
         max_new_tokens: int | None = None,
         temperature: float | None = None,
+        prompt: str | None = None,
     ) -> dict[str, Any]:
         """Answer one question about one image.
 
         Returns the shape every specialist node produces:
         ``{answer, evidence, confidence, model_used}``.
+
+        `prompt` overrides the standard single-turn framing. The fusion node
+        uses it to fold its sensor summary in beside the question; it must still
+        carry exactly one image token.
         """
         self.load()
 
@@ -252,7 +284,7 @@ class GeoChatEngine:
         from PIL import Image
 
         image = Image.open(image_path).convert("RGB")
-        prompt = build_prompt(question)
+        prompt = prompt or build_prompt(question)
         max_new = max_new_tokens or self.config.max_new_tokens
         temp = self.config.temperature if temperature is None else temperature
 

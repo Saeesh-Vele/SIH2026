@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
-from app.agent.graph import NODE_SEQUENCE, get_graph, initial_state
+from app.agent.graph import get_graph, initial_state, node_sequence
 from app.db import mongo
 from app.models.schemas import (
     INTENT_TO_TASK,
@@ -86,7 +86,10 @@ async def stream_query(payload: QueryRequest) -> StreamingResponse:
     )
 
     async def events() -> AsyncIterator[str]:
-        yield _sse("plan", {"query_id": state["query_id"], "nodes": list(NODE_SEQUENCE)})
+        # With a forced intent the path is already known; otherwise this is the
+        # single-image default, and the steps correct it as they land.
+        planned = node_sequence(INTENT_TO_TASK.get(payload.intent) if payload.intent else None)
+        yield _sse("plan", {"query_id": state["query_id"], "nodes": list(planned)})
 
         sent = 0
         merged: dict[str, Any] = dict(state)
