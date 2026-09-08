@@ -136,7 +136,7 @@ FUSION_RESULT = {
     "answer": "Three vessels are berthed along the quay.",
     "evidence": [],
     "confidence": 0.66,
-    "model_used": "ssl4eo_s12_vit_base_patch16_224 (concat) + llava-hf/llava-1.5-7b-hf",
+    "model_used": "vit_base_patch16_224 (optical 13b + SAR 2b, concat) + llava-hf/llava-1.5-7b-hf",
     "fusion_description": "strong radar backscatter; flat optical response; the sensors disagree.",
     "fusion_stats": {"sar_share": 0.72, "agreement": 0.11, "width": 768.0},
     "fused_width": 1536,
@@ -421,8 +421,14 @@ def test_fusion_config_reads_the_real_yaml():
     raw = yaml.safe_load((BACKEND / "model_config.yaml").read_text())["optical_sar_fusion"]
     config = FusionConfig.from_mapping(raw)
     assert config.fusion_strategy == "concat"
-    assert "ssl4eo" in config.encoder.lower()
-    assert config.checkpoint_path
+    # `encoder` is the timm architecture, shared; the weights are per modality.
+    assert config.encoder == "vit_base_patch16_224", config.encoder
+    assert "optical" in (config.optical_checkpoint_path or ""), config.optical_checkpoint_path
+    assert "sar" in (config.sar_checkpoint_path or ""), config.sar_checkpoint_path
+    assert config.optical_checkpoint_path != config.sar_checkpoint_path
+    # Sentinel-2 L1C is 13 bands; Sentinel-1 is VV + VH.
+    assert config.optical_in_chans == 13, config.optical_in_chans
+    assert config.sar_in_chans == 2, config.sar_in_chans
     # The YAML wording wins, and any band it omits still has a default.
     assert config.feature_vocabulary["sar_high"] == raw["feature_vocabulary"]["sar_high"]
     assert set(config.feature_vocabulary) >= {
@@ -446,29 +452,150 @@ def test_fusion_config_rejects_an_unknown_strategy():
         raise AssertionError("an unknown fusion_strategy must not be accepted silently")
 
 
+def test_fusion_config_rejects_the_single_checkpoint_schema():
+    """One checkpoint cannot serve both modalities, so the old key must not pass."""
+    from app.models.fusion import FusionConfig
+
+    try:
+        FusionConfig.from_mapping({"checkpoint_path": "./weights/fusion/ssl4eo.pth"})
+    except ValueError as exc:
+        assert "optical_checkpoint_path" in str(exc) and "sar_checkpoint_path" in str(exc), exc
+    else:
+        raise AssertionError("a legacy single-checkpoint config must fail loudly, not silently")
+
+
+def test_config_routes_each_modality_to_its_own_weights():
+    from app.models.fusion import MODALITIES, FusionConfig
+
+    config = FusionConfig(
+        optical_checkpoint_path="/w/optical.pth",
+        optical_in_chans=13,
+        sar_checkpoint_path="/w/sar.pth",
+        sar_in_chans=2,
+    )
+    assert config.checkpoint_for("optical") == ("/w/optical.pth", 13)
+    assert config.checkpoint_for("sar") == ("/w/sar.pth", 2)
+    assert MODALITIES == ("optical", "sar"), "optical is concatenated first"
+
+    try:
+        config.checkpoint_for("lidar")
+    except ValueError as exc:
+        assert "lidar" in str(exc)
+    else:
+        raise AssertionError("an unknown modality must not resolve to either encoder")
+
+
 def test_fusion_engine_refuses_to_run_without_weights():
     """Random weights would still produce a confident sentence. They must not."""
     from app.models.fusion import FusionConfig, FusionEngine
 
-    for config, needle in (
-        (FusionConfig(checkpoint_path=None), "no checkpoint_path"),
-        (FusionConfig(checkpoint_path="/nonexistent/ssl4eo.pth"), "not found"),
-    ):
+    complete = {
+        "optical_checkpoint_path": "/nonexistent/optical.pth",
+        "optical_in_chans": 13,
+        "sar_checkpoint_path": "/nonexistent/sar.pth",
+        "sar_in_chans": 2,
+    }
+    # `load` walks MODALITIES in order, so optical is the one that reports.
+    # Whichever modality fails, the message has to name it — a bare "weights not
+    # found" would leave you guessing which of the two paths to fix.
+    cases = [
+        (FusionConfig(**{**complete, "optical_checkpoint_path": None}), "no optical_checkpoint_path"),
+        (FusionConfig(**complete), "optical encoder weights not found"),
+    ]
+    for config, needle in cases:
         engine = FusionEngine(config)
         assert engine.loaded is False
         try:
             engine.load()
         except ModelUnavailable as exc:
-            assert needle in str(exc), exc
+            assert needle in str(exc), (needle, exc)
         else:
-            raise AssertionError(f"loading {config.checkpoint_path} should have been refused")
+            raise AssertionError(f"expected {needle!r} to be refused")
+
+    # The SAR half is refused the same way; it is only reached once optical is
+    # satisfiable, so its message is checked on the string the config builds.
+    sar_only = FusionConfig(**{**complete, "sar_checkpoint_path": None})
+    assert sar_only.checkpoint_for("sar") == (None, 2)
+    assert sar_only.checkpoint_for("optical")[0] == "/nonexistent/optical.pth"
+
+
+def test_embed_rejects_a_modality_it_has_no_encoder_for():
+    """Routing is checked before loading, so this needs no weights."""
+    from app.models.fusion import FusionConfig, FusionEngine
+
+    engine = FusionEngine(FusionConfig())
+    try:
+        engine.embed("/tmp/scene.tif", "lidar")
+    except ValueError as exc:
+        assert "lidar" in str(exc), exc
+    else:
+        raise AssertionError("embed must not silently pick an encoder for an unknown modality")
+
+
+class _FakeWeight:
+    """Stands in for a patch-embed tensor without importing torch."""
+
+    def __init__(self, shape: tuple[int, ...]):
+        self.shape = shape
+        self.ndim = len(shape)
+
+
+def test_checkpoint_band_count_is_read_not_assumed():
+    """The band count is what a remote-sensing checkpoint most often differs on."""
+    from app.models.fusion import _checkpoint_in_chans, _unwrap_state_dict
+
+    # Sentinel-1 SAR: VV + VH.
+    assert _checkpoint_in_chans({"patch_embed.proj.weight": _FakeWeight((768, 2, 16, 16))}) == 2
+    # Sentinel-2 L1C: 13 bands.
+    assert _checkpoint_in_chans({"patch_embed.proj.weight": _FakeWeight((768, 13, 16, 16))}) == 13
+    # Nothing to read from.
+    assert _checkpoint_in_chans({}) is None
+    assert _checkpoint_in_chans({"patch_embed.proj.weight": _FakeWeight((768, 16))}) is None
+
+    # Publishers nest the weights under different keys; all of them unwrap.
+    inner = {"patch_embed.proj.weight": _FakeWeight((768, 2, 16, 16))}
+    for key in ("model", "state_dict", "model_state_dict"):
+        assert _unwrap_state_dict({key: inner, "optimizer": {}}) is inner, key
+    assert _unwrap_state_dict(inner) is inner, "a bare state dict passes through"
+
+
+def test_to_tensor_keeps_arrays_and_pil_images_apart():
+    """A numpy array also has .resize and .tobytes, and means something else by them.
+
+    Skipped where torch is absent — it is an inference dependency, not a service
+    one, and this is the only check here that needs it.
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError:  # pragma: no cover - depends on install
+        return
+
+    from app.models.fusion import _to_tensor
+
+    # The array branch: (bands, h, w), as rasterio hands it over.
+    bands = 13
+    array = [[[float(b + 1)] * 8 for _ in range(8)] for b in range(bands)]
+    tensor = _to_tensor(array, bands, (4, 4), (0.5,) * bands, (0.5,) * bands)
+    assert tuple(tensor.shape) == (bands, 4, 4), tuple(tensor.shape)
+
+    # RGB statistics do not describe 13 bands, so they are replaced rather than
+    # broadcast — a wrong normalisation would be silent and would skew every
+    # embedding downstream.
+    rgb_stats = _to_tensor(array, bands, (4, 4), (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    assert tuple(rgb_stats.shape) == (bands, 4, 4)
+
+    # A single-band array is promoted rather than rejected.
+    assert tuple(_to_tensor([[1.0] * 8] * 8, 1, (4, 4), (0.5,), (0.5,)).shape) == (1, 4, 4)
 
 
 def test_fusion_engine_names_both_halves():
     from app.models.fusion import FusionConfig, FusionEngine
 
     used = FusionEngine(FusionConfig()).model_used
-    assert "ssl4eo" in used.lower() and "concat" in used and "llava" in used
+    # Both band counts appear: they are what distinguishes the two encoders.
+    assert used == (
+        "vit_base_patch16_224 (optical 13b + SAR 2b, concat) + llava-hf/llava-1.5-7b-hf"
+    ), used
 
 
 # --------------------------------------------------------------------------
@@ -582,8 +709,11 @@ def test_task_router_resolves_the_new_specialists():
     )
     assert fusion["task"] is TaskType.OPTICAL_SAR_FUSION
     assert fusion["model_config_used"]["fusion_strategy"] == "concat"
-    # The encoder is the half that distinguishes fusion, so it is what the trace names.
-    assert "ssl4eo" in fusion["steps"][0]["detail"].lower(), fusion["steps"]
+    # The encoder is the half that distinguishes fusion, so it is what the trace
+    # names — not the VQA base_model the entry also carries.
+    detail = fusion["steps"][0]["detail"]
+    assert "vit_base_patch16_224" in detail, detail
+    assert "llava" not in detail.lower(), detail
 
 
 def test_registry_builds_real_engines_for_every_task():

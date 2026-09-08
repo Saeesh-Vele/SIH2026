@@ -45,8 +45,23 @@ change_detection:
 # Real SSL4EO-S12 or DeCUR weights drop in at checkpoint_path without a code
 # change; until then the node reports itself unavailable rather than guessing.
 optical_sar_fusion:
-  encoder: ssl4eo_s12_vit_base_patch16_224   # timm-style id, or a DeCUR variant
-  checkpoint_path: ./weights/fusion/ssl4eo_s12_vitb16.pth
+  # The architecture, not the pretraining run: SSL4EO-S12's checkpoints are
+  # plain ViT-Base/16 trained with MAE, so timm builds them under its standard
+  # name and the weights load in. A DeCUR variant of the same shape works here
+  # too — only the checkpoint paths change.
+  encoder: vit_base_patch16_224
+  # One architecture, two sets of weights. SSL4EO-S12 pretrains per modality and
+  # the two are not interchangeable: an encoder trained on Sentinel-1 cannot read
+  # Sentinel-2 and vice versa, because the patch embedding is built for a
+  # specific band count. Both are ViT-B/16, so both pool to 768 and concatenate
+  # to 1536 — `FusionEngine.load` checks that rather than assuming it.
+  #
+  # in_chans must match each checkpoint's own patch_embed weight. Confirm with
+  # `python tests/verify_fusion_checkpoint.py`, which reads it off the file.
+  optical_checkpoint_path: ./weights/fusion/ssl4eo_s12_optical_vitb16.pth
+  optical_in_chans: 13              # Sentinel-2 L1C; L2A would be 12
+  sar_checkpoint_path: ./weights/fusion/ssl4eo_s12_sar_vitb16.pth
+  sar_in_chans: 2                   # Sentinel-1 VV + VH
   fusion_strategy: concat            # one of: concat | cross_attention | gated
   device: cuda:0
   base_model: llava-hf/llava-1.5-7b-hf

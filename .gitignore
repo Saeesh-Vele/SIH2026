@@ -18,6 +18,8 @@ backend/venv/
 checkpoints/
 *.safetensors
 *.bin
+*.pth
+backend/weights/
 
 # OS
 .DS_Store

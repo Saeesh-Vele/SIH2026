@@ -5,6 +5,8 @@ Four steps, and only the first needs weights of its own:
 1. **Encode.** One SSL4EO-S12 (or DeCUR) encoder per modality turns the optical
    scene and the SAR capture into embeddings. Those pretraining schemes align
    the two modalities in a shared space, which is what makes step 3 meaningful.
+   Both publish plain ViT-Base/16 weights, so `encoder` names the timm
+   architecture and `checkpoint_path` names the pretraining run that fills it.
 2. **Fuse.** Concatenate them — the strategy is `fusion_strategy` in
    model_config.yaml, and `concat` is the default because it loses nothing and
    needs no learned head.
@@ -37,10 +39,17 @@ from app.models.geochat import GeoChatConfig, GeoChatEngine, ModelUnavailable
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ENCODER = "ssl4eo_s12_vit_base_patch16_224"
+#: The architecture timm builds, not the pretraining run. SSL4EO-S12 and DeCUR
+#: both publish ViT-Base/16 checkpoints that load into this; which weights are
+#: used is `checkpoint_path`, not this name.
+DEFAULT_ENCODER = "vit_base_patch16_224"
 DEFAULT_MODEL = "llava-hf/llava-1.5-7b-hf"
 
 FUSION_STRATEGIES = ("concat", "cross_attention", "gated")
+
+#: The two halves, in the order they are concatenated. Optical first, so the
+#: fused vector's first half is always the modality the VQA model also sees.
+MODALITIES = ("optical", "sar")
 
 #: Fallbacks when model_config.yaml supplies no `feature_vocabulary`. Keeping a
 #: default here means the node still says something honest if the block is
@@ -64,8 +73,14 @@ _AGREEMENT_BAND = 0.35
 class FusionConfig:
     """The `optical_sar_fusion` block of model_config.yaml."""
 
+    #: One architecture for both modalities; the weights differ, not the shape.
     encoder: str = DEFAULT_ENCODER
-    checkpoint_path: str | None = None
+    #: Sentinel-2 L1C is 13 bands, L2A is 12.
+    optical_checkpoint_path: str | None = None
+    optical_in_chans: int = 13
+    #: Sentinel-1 is 2 bands, VV and VH.
+    sar_checkpoint_path: str | None = None
+    sar_in_chans: int = 2
     fusion_strategy: str = "concat"
     device: str = "cuda:0"
     base_model: str = DEFAULT_MODEL
@@ -81,9 +96,22 @@ class FusionConfig:
             raise ValueError(
                 f"unknown fusion_strategy {strategy!r}; expected one of {', '.join(FUSION_STRATEGIES)}"
             )
+        # The single-checkpoint schema cannot be honoured: whichever modality it
+        # was trained on, the other one would be encoded by the wrong weights.
+        # Failing here beats fusing a real embedding with a meaningless one.
+        if "checkpoint_path" in raw:
+            raise ValueError(
+                "optical_sar_fusion.checkpoint_path is no longer read — the two "
+                "modalities need separate encoders. Replace it with "
+                "optical_checkpoint_path and sar_checkpoint_path."
+            )
+
         return cls(
             encoder=raw.get("encoder") or DEFAULT_ENCODER,
-            checkpoint_path=raw.get("checkpoint_path"),
+            optical_checkpoint_path=raw.get("optical_checkpoint_path"),
+            optical_in_chans=int(raw.get("optical_in_chans", 13)),
+            sar_checkpoint_path=raw.get("sar_checkpoint_path"),
+            sar_in_chans=int(raw.get("sar_in_chans", 2)),
             fusion_strategy=strategy,
             device=raw.get("device", "cuda:0"),
             base_model=raw.get("base_model") or DEFAULT_MODEL,
@@ -99,6 +127,14 @@ class FusionConfig:
             max_new_tokens=self.max_new_tokens,
             temperature=self.temperature,
         )
+
+    def checkpoint_for(self, modality: str) -> tuple[str | None, int]:
+        """The weights and band count for one modality."""
+        if modality == "optical":
+            return self.optical_checkpoint_path, self.optical_in_chans
+        if modality == "sar":
+            return self.sar_checkpoint_path, self.sar_in_chans
+        raise ValueError(f"unknown modality {modality!r}; expected 'optical' or 'sar'")
 
 
 # --------------------------------------------------------------------------
@@ -201,86 +237,154 @@ def build_fusion_prompt(description: str, question: str) -> str:
 # Engine
 # --------------------------------------------------------------------------
 class FusionEngine:
-    """Encodes an optical+SAR pair, fuses it, and answers a question about it."""
+    """Encodes an optical+SAR pair, fuses it, and answers a question about it.
+
+    Two encoders, not one. SSL4EO-S12 pretrains per modality and the results are
+    not interchangeable: the patch embedding is built for a specific band count,
+    so a Sentinel-1 encoder cannot read Sentinel-2 imagery at all. Both are
+    ViT-B/16 and pool to the same width, which is what makes the halves
+    concatenable — and `load` checks that rather than trusting it.
+    """
 
     def __init__(self, config: FusionConfig, vqa: GeoChatEngine | None = None):
         self.config = config
         self.vqa = vqa if vqa is not None else GeoChatEngine(config.as_vqa_config())
-        self._encoder: Any = None
+        self._encoders: dict[str, Any] = {}
 
     @property
     def loaded(self) -> bool:
-        return self._encoder is not None
+        return set(self._encoders) >= set(MODALITIES)
 
     @property
     def model_used(self) -> str:
-        return f"{self.config.encoder} ({self.config.fusion_strategy}) + {self.config.base_model}"
+        return (
+            f"{self.config.encoder} (optical {self.config.optical_in_chans}b + "
+            f"SAR {self.config.sar_in_chans}b, {self.config.fusion_strategy}) + "
+            f"{self.config.base_model}"
+        )
 
     # -- loading ----------------------------------------------------------
-    def load(self) -> None:
-        """Bring the fusion encoder into memory. Raises ModelUnavailable on a bad env.
+    def _load_one(self, modality: str) -> Any:
+        """Build the architecture for one modality and fill it from its checkpoint.
 
-        Deliberately strict about the checkpoint: an SSL4EO-S12 architecture with
-        random weights would still produce an embedding, and that embedding would
-        still yield a confident-sounding sentence. Refusing is the honest answer.
+        Deliberately strict: a ViT-B/16 with random weights would still produce
+        an embedding, and that embedding would still yield a confident-sounding
+        sentence. Refusing is the honest answer.
         """
-        if self.loaded:
-            return
+        import timm
+        import torch
 
-        checkpoint = self.config.checkpoint_path
+        checkpoint, in_chans = self.config.checkpoint_for(modality)
         if not checkpoint:
             raise ModelUnavailable(
-                "no checkpoint_path set for optical_sar_fusion; point it at SSL4EO-S12 "
-                "or DeCUR weights in model_config.yaml"
+                f"no {modality}_checkpoint_path set for optical_sar_fusion; point it at "
+                "SSL4EO-S12 or DeCUR weights in model_config.yaml"
             )
         path = Path(checkpoint)
         if not path.exists():
             raise ModelUnavailable(
-                f"fusion encoder weights not found at {path}. Download SSL4EO-S12 or "
-                "DeCUR weights, or point checkpoint_path at a local copy."
+                f"{modality} encoder weights not found at {path}. Download the SSL4EO-S12 "
+                f"{modality} checkpoint, or point {modality}_checkpoint_path at a local copy."
             )
 
+        raw = torch.load(path, map_location="cpu", weights_only=False)
+        state = _unwrap_state_dict(raw)
+
+        # The band count is the thing a remote-sensing checkpoint is most likely
+        # to differ on, and a mismatch silently leaves the patch embedding
+        # random. Check it before building rather than after.
+        bands = _checkpoint_in_chans(state)
+        if bands is not None and bands != in_chans:
+            raise ModelUnavailable(
+                f"{path.name} was trained on {bands} input bands but {modality}_in_chans "
+                f"is {in_chans}. Set {modality}_in_chans: {bands} in model_config.yaml, "
+                f"or point {modality}_checkpoint_path at weights for this many bands."
+            )
+
+        encoder = timm.create_model(
+            self.config.encoder, pretrained=False, num_classes=0, in_chans=in_chans
+        )
+        # MAE checkpoints carry a decoder the encoder-only model has no slot for;
+        # strict=False drops it. `tests/verify_fusion_checkpoint.py` reports
+        # exactly what each checkpoint left behind.
+        encoder.load_state_dict(state, strict=False)
+        return encoder.eval().to(self.config.device)
+
+    def load(self) -> None:
+        """Bring both encoders into memory. Raises ModelUnavailable on a bad env."""
+        if self.loaded:
+            return
+
         try:
-            import timm
-            import torch
+            import timm  # noqa: F401
+            import torch  # noqa: F401
         except ImportError as exc:
             raise ModelUnavailable(
-                "timm and torch are needed for the fusion encoder; install scripts/requirements.txt"
+                "timm and torch are needed for the fusion encoders; install "
+                "scripts/requirements.txt"
             ) from exc
 
         started = time.perf_counter()
-        try:
-            encoder = timm.create_model(self.config.encoder, pretrained=False, num_classes=0)
-            state = torch.load(path, map_location="cpu")
-            encoder.load_state_dict(state.get("state_dict", state), strict=False)
-            encoder.eval().to(self.config.device)
-        except Exception as exc:  # noqa: BLE001 - surface any load failure as one type
-            raise ModelUnavailable(f"could not load {self.config.encoder}: {exc}") from exc
+        encoders: dict[str, Any] = {}
+        for modality in MODALITIES:
+            try:
+                encoders[modality] = self._load_one(modality)
+            except ModelUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one failure type out of here
+                raise ModelUnavailable(
+                    f"could not load the {modality} encoder ({self.config.encoder}): {exc}"
+                ) from exc
 
-        self._encoder = encoder
+        # Concatenating two embeddings only means anything if they are the same
+        # width, and cosine agreement needs them elementwise comparable. Both
+        # hold for two ViT-B/16 towers, but a swapped checkpoint could break it
+        # silently, so it is checked once here instead of assumed at every call.
+        widths = {m: int(getattr(e, "num_features", 0)) for m, e in encoders.items()}
+        if len(set(widths.values())) != 1 or not all(widths.values()):
+            raise ModelUnavailable(
+                f"the two encoders pool to different widths ({widths}); fusion needs "
+                "one shared embedding space. Use checkpoints of the same architecture."
+            )
+
+        self._encoders = encoders
+        self.embedding_width = next(iter(widths.values()))
         logger.info(
-            "fusion encoder %s loaded in %.1fs", self.config.encoder, time.perf_counter() - started
+            "fusion encoders loaded in %.1fs: %s",
+            time.perf_counter() - started,
+            ", ".join(f"{m} {self.config.checkpoint_for(m)[1]}b -> {w}d" for m, w in widths.items()),
         )
 
     # -- embedding --------------------------------------------------------
-    def embed(self, image_path: str | Path) -> list[float]:
-        """One pooled embedding for one image, whichever modality it is.
+    def embed(self, image_path: str | Path, modality: str) -> list[float]:
+        """One pooled embedding for one image, through that modality's encoder.
 
-        Both modalities go through the same encoder because SSL4EO-S12 and DeCUR
-        are trained that way — the modality is carried by the input statistics,
-        not by a separate set of weights.
+        The band count has to match what the encoder was pretrained on, so an
+        image carrying the wrong number is refused rather than padded or
+        truncated into shape — either would put made-up values in front of a
+        model whose output is then described in words.
         """
+        if modality not in MODALITIES:
+            raise ValueError(f"unknown modality {modality!r}; expected one of {MODALITIES}")
         self.load()
 
         import torch
-        from PIL import Image
 
-        image = Image.open(image_path).convert("RGB")
-        config = timm_config(self._encoder)
-        tensor = _to_tensor(image, config["input_size"], config["mean"], config["std"])
+        encoder = self._encoders[modality]
+        _, expected = self.config.checkpoint_for(modality)
+        image, bands = _read_bands(image_path)
+        if bands != expected:
+            raise ModelUnavailable(
+                f"the {modality} image has {bands} band(s) but its encoder was pretrained "
+                f"on {expected}. Bind a {expected}-band capture "
+                f"({'Sentinel-2 multispectral' if modality == 'optical' else 'Sentinel-1 VV+VH'}), "
+                f"or point {modality}_checkpoint_path at weights for {bands} bands."
+            )
 
+        config = timm_config(encoder)
+        tensor = _to_tensor(image, bands, config["input_size"], config["mean"], config["std"])
         with torch.inference_mode():
-            features = self._encoder(tensor.unsqueeze(0).to(self.config.device))
+            features = encoder(tensor.unsqueeze(0).to(self.config.device))
         return [float(v) for v in features.flatten().float().cpu().tolist()]
 
     # -- inference --------------------------------------------------------
@@ -300,8 +404,8 @@ class FusionEngine:
         fusion produces a described scene, not geometry.
         """
         started = time.perf_counter()
-        optical = self.embed(optical_path)
-        sar = self.embed(sar_path)
+        optical = self.embed(optical_path, "optical")
+        sar = self.embed(sar_path, "sar")
 
         fused = fuse_embeddings(optical, sar, self.config.fusion_strategy)
         stats = fusion_stats(optical, sar)
@@ -327,6 +431,23 @@ class FusionEngine:
         }
 
 
+def _unwrap_state_dict(raw: Any) -> dict:
+    """Pull the weights out of a checkpoint. Publishers nest them differently."""
+    if not isinstance(raw, dict):
+        return raw
+    for key in ("state_dict", "model", "model_state_dict"):
+        inner = raw.get(key)
+        if isinstance(inner, dict):
+            return inner
+    return raw
+
+
+def _checkpoint_in_chans(state: dict) -> int | None:
+    """Input bands the checkpoint was trained on, from its patch embedding."""
+    weight = state.get("patch_embed.proj.weight")
+    return int(weight.shape[1]) if weight is not None and getattr(weight, "ndim", 0) == 4 else None
+
+
 def timm_config(encoder: Any) -> dict[str, Any]:
     """Input size and normalisation the encoder was trained with.
 
@@ -342,13 +463,85 @@ def timm_config(encoder: Any) -> dict[str, Any]:
     }
 
 
-def _to_tensor(image: Any, size: tuple[int, int], mean: tuple, std: tuple) -> Any:
-    """Resize, scale to 0-1 and normalise, without pulling in torchvision."""
+def _read_bands(image_path: str | Path) -> tuple[Any, int]:
+    """Open an image and report how many bands it actually carries.
+
+    Tries a real multispectral reader first. Sentinel-2 imagery is 12-13 bands
+    and Sentinel-1 is 2, and PIL has no mode for either — it can only describe
+    1, 3 or 4 band rasters — so without rasterio or tifffile a multispectral
+    GeoTIFF cannot be read at all. Saying that plainly is better than handing
+    back a silently truncated three-band version of a thirteen-band scene.
+    """
+    path = Path(image_path)
+
+    try:  # pragma: no cover - depends on install
+        import rasterio
+
+        with rasterio.open(path) as src:
+            return src.read(), int(src.count)
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - not a raster rasterio understands
+        logger.debug("rasterio could not read %s: %s", path, exc)
+
+    try:  # pragma: no cover - depends on install
+        import tifffile
+
+        array = tifffile.imread(path)
+        bands = int(array.shape[0] if array.ndim == 3 and array.shape[0] <= 32 else 1)
+        return array, bands
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - not a TIFF tifffile understands
+        logger.debug("tifffile could not read %s: %s", path, exc)
+
+    from PIL import Image
+
+    image = Image.open(path)
+    bands = len(image.getbands())
+    if path.suffix.lower() in {".tif", ".tiff", ".gtiff"} and bands <= 4:
+        raise ModelUnavailable(
+            f"{path.name} was read through PIL, which reports {bands} band(s) and cannot "
+            "describe more. Install rasterio to read multispectral GeoTIFFs; without it "
+            "a Sentinel-2 scene cannot be encoded."
+        )
+    return image, bands
+
+
+def _to_tensor(image: Any, bands: int, size: tuple[int, int], mean: tuple, std: tuple) -> Any:
+    """Resize, scale to 0-1 and normalise, without pulling in torchvision.
+
+    Takes either a PIL image or a (bands, h, w) array, so the multispectral
+    readers and the PIL fallback both land here.
+
+    Normalisation note: `mean`/`std` come from the architecture's ImageNet
+    defaults, which describe RGB and nothing else. For any other band count this
+    falls back to a plain 0.5/0.5, which centres the input without pretending to
+    know the sensor's statistics. SSL4EO-S12 publishes per-band values, and they
+    belong in model_config.yaml before these embeddings are trusted.
+    """
     import torch
 
-    resized = image.resize(size)
-    tensor = torch.frombuffer(resized.tobytes(), dtype=torch.uint8).float().div(255.0)
-    tensor = tensor.reshape(size[1], size[0], 3).permute(2, 0, 1)
-    mean_t = torch.tensor(mean).reshape(3, 1, 1)
-    std_t = torch.tensor(std).reshape(3, 1, 1)
+    from PIL.Image import Image as PILImage
+
+    # Not a duck-typed check: numpy arrays also carry .resize and .tobytes, and
+    # they mean something completely different there.
+    if isinstance(image, PILImage):
+        resized = image.resize(size)
+        tensor = torch.frombuffer(bytearray(resized.tobytes()), dtype=torch.uint8)
+        tensor = tensor.float().div(255.0).reshape(size[1], size[0], bands).permute(2, 0, 1)
+    else:  # (bands, h, w) from rasterio or tifffile
+        tensor = torch.as_tensor(image).float()
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)
+        peak = float(tensor.max()) or 1.0
+        tensor = tensor.div(peak)
+        tensor = torch.nn.functional.interpolate(
+            tensor.unsqueeze(0), size=(size[1], size[0]), mode="bilinear", align_corners=False
+        ).squeeze(0)
+
+    if len(mean) != bands or len(std) != bands:
+        mean, std = (0.5,) * bands, (0.5,) * bands
+    mean_t = torch.tensor(mean).reshape(bands, 1, 1)
+    std_t = torch.tensor(std).reshape(bands, 1, 1)
     return (tensor - mean_t) / std_t

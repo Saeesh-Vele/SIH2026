@@ -206,9 +206,13 @@ to each frame separately.
 
 Encode, fuse, verbalise, answer:
 
-1. One SSL4EO-S12 (or DeCUR) encoder embeds both the optical scene and the SAR
-   capture. Those pretraining schemes align the two modalities in a shared
-   space, which is what makes step 3 mean anything.
+1. **Two** SSL4EO-S12 encoders, one per modality. `encoder` is the timm
+   **architecture** and is shared (`vit_base_patch16_224`);
+   `optical_checkpoint_path` and `sar_checkpoint_path` are the **pretraining
+   runs** that fill it. They are not interchangeable — each patch embedding is
+   built for a band count, so the Sentinel-1 encoder cannot read Sentinel-2 and
+   vice versa. Both are ViT-B/16 and pool to 768, so concat gives 1536;
+   `FusionEngine.load` checks that rather than assuming it.
 2. The embeddings are fused — `fusion_strategy: concat` by default, since it
    loses nothing and needs no learned head. `gated` weights each modality by its
    share of the magnitude; `cross_attention` needs a trained head and is
@@ -225,10 +229,53 @@ Encode, fuse, verbalise, answer:
    reasoning, so hiding it would make the answer harder to check.
 
 The encoder is the one part that needs real weights. Until `checkpoint_path`
-points at some, the node reports itself unavailable: an SSL4EO-S12 architecture
-with random weights would still produce an embedding, and that embedding would
-still yield a confident-sounding sentence. Dropping real weights in is a path in
+points at some, the node reports itself unavailable: a ViT-Base/16 with random
+weights would still produce an embedding, and that embedding would still yield a
+confident-sounding sentence. Dropping real weights in is a path in
 `model_config.yaml` and nothing else.
+
+```bash
+mkdir -p backend/weights/fusion
+curl -L -o backend/weights/fusion/ssl4eo_s12_vitb16.pth \
+  https://huggingface.co/wangyi111/SSL4EO-S12/resolve/main/B2_vitb16_mae_ep99.pth
+
+python backend/tests/verify_fusion_checkpoint.py
+```
+
+The verifier builds the architecture twice, loads each checkpoint into its own
+instance, and separates the leftovers into three kinds — missing, unexpected and
+shape mismatches — because they mean different things. Both are clean:
+
+| | bands | tensors | missing | unexpected | mismatch | matched |
+| --- | --- | --- | --- | --- | --- | --- |
+| optical (`251k_ms.lmdb`) | 13 | 259 | 0 | 109 | 0 | 150 |
+| SAR (`251k_sar.lmdb`) | 2 | 254 | 0 | 104 | 0 | 150 |
+
+The unexpected keys are the MAE decoder and mask token, which exist only during
+pretraining; the optical checkpoint adds three `hog.*` buffers from the MAE-MFP
+training variant. Both pool to 768d, so concat gives 1536d.
+
+Weights are gitignored; the URLs above are the source of truth.
+
+**Band counts are read, not assumed.** Sentinel-1 is 2 bands (VV, VH) and
+Sentinel-2 is 13 (L1C) or 12 (L2A); none of them is RGB's 3. Built at timm's
+default the tensor shapes collide and the patch embedding stays randomly
+initialised, which is why a shape mismatch is a failure rather than a warning and
+why `load` checks each checkpoint's own `patch_embed.proj.weight` before building
+anything. `FusionConfig` also rejects the old single `checkpoint_path` outright
+rather than letting one modality be encoded by the other's weights.
+
+**Still needed before real inference**, both of which are input-side rather than
+model-side — the encoders themselves load and run:
+
+- *A multispectral reader.* PIL has no mode for 13-band or 2-band rasters, so
+  `_read_bands` tries rasterio, then tifffile, then PIL, and refuses with a
+  named reason rather than handing back a silently truncated three-band version
+  of a thirteen-band scene. `pip install rasterio` closes it.
+- *Per-band normalisation statistics.* `_to_tensor` falls back to 0.5/0.5 for any
+  band count it has no statistics for, which centres the input without
+  pretending to know the sensor. SSL4EO-S12 publishes per-band values, and they
+  belong in `model_config.yaml` before these embeddings are trusted.
 
 **Running it locally.** LLaVA-1.5-7B in 4-bit needs a CUDA GPU. To exercise the
 whole path without one, run unquantized on CPU:
