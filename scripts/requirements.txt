@@ -4,6 +4,8 @@ torch>=2.4
 transformers>=4.44
 accelerate>=0.34
 bitsandbytes>=0.43
+# LoRA adapters (backend/checkpoints/) are applied through peft at load time.
+peft>=0.20
 sentencepiece>=0.2
 # The optical-SAR fusion encoder (SSL4EO-S12 / DeCUR) is built through timm.
 timm>=1.0

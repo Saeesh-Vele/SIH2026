@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "llava-hf/llava-1.5-7b-hf"
 
+#: Relative `adapter_path` values in model_config.yaml resolve against this, so
+#: the config reads the same whether the server was started from the repo root
+#: or from backend/. Mirrors `app.core.config.BACKEND_ROOT`, but computed here
+#: so this module stays importable without the FastAPI settings stack.
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
 #: A GeoChat-format checkpoint, for the `geochat` loader path. Not the default:
 #: it needs the official `geochat` package and its 2023-era dependency stack.
 GEOCHAT_MODEL = "MBZUAI/geochat-7B"
@@ -64,6 +70,14 @@ class GeoChatConfig:
     device: str = "cuda:0"
     max_new_tokens: int = 256
     temperature: float = 0.2
+
+    @property
+    def resolved_adapter_path(self) -> Path | None:
+        """`adapter_path` as an absolute path, or None when running zero-shot."""
+        if not self.adapter_path:
+            return None
+        path = Path(self.adapter_path)
+        return path if path.is_absolute() else (BACKEND_ROOT / path).resolve()
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "GeoChatConfig":
@@ -157,6 +171,24 @@ class GeoChatEngine:
                 "torch is not installed; install scripts/requirements.txt"
             ) from exc
 
+        adapter = self.config.resolved_adapter_path
+        if adapter is not None:
+            # Checked before the base model is fetched: a typo in adapter_path
+            # should not cost a 14 GB download to discover.
+            if not (adapter / "adapter_config.json").is_file():
+                raise ModelUnavailable(
+                    f"no adapter_config.json under {adapter} — vqa_grounding.adapter_path "
+                    "in model_config.yaml does not point at a PEFT adapter directory. "
+                    "Set it to null to run the zero-shot base."
+                )
+            try:
+                import peft  # noqa: F401
+            except ImportError as exc:
+                raise ModelUnavailable(
+                    f"peft is not installed but adapter_path is set to {self.config.adapter_path}; "
+                    "install scripts/requirements.txt, or set adapter_path to null"
+                ) from exc
+
         if self.config.quantization == "4bit":
             if not torch.cuda.is_available():
                 raise ModelUnavailable(
@@ -210,6 +242,7 @@ class GeoChatEngine:
                 self._load_geochat()
             else:
                 self._load_llava()
+            self._apply_adapter()
         except ModelUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - surface any load failure as one type
@@ -221,6 +254,43 @@ class GeoChatEngine:
             "geochat" if use_geochat else "llava",
             time.perf_counter() - started,
         )
+
+    def _apply_adapter(self) -> None:
+        """Wrap the loaded base model in the configured LoRA adapter.
+
+        Runs after either loader, since a LoRA adapter is a delta on the base
+        weights and does not care which class produced them — only that the
+        module names it targets are there. `adapter_config.json` records the
+        base it was tuned against; a mismatch against `base_model` is logged
+        rather than raised, because a compatible rename (a local copy of the
+        same weights, say) is legitimate and only the caller can tell.
+
+        No-op when `adapter_path` is unset, which is how the zero-shot base is
+        run for comparison.
+        """
+        adapter = self.config.resolved_adapter_path
+        if adapter is None:
+            return
+
+        import json
+
+        from peft import PeftModel
+
+        trained_on = json.loads((adapter / "adapter_config.json").read_text()).get(
+            "base_model_name_or_path"
+        )
+        if trained_on and trained_on != self.config.base_model:
+            logger.warning(
+                "adapter %s was trained on %s but base_model is %s; loading anyway, "
+                "but the tuned layers may not line up",
+                adapter.name,
+                trained_on,
+                self.config.base_model,
+            )
+
+        self._model = PeftModel.from_pretrained(self._model, str(adapter))
+        self._model.eval()
+        logger.info("applied LoRA adapter %s", adapter.name)
 
     def _load_geochat(self) -> None:
         """Official GeoChat path — requires the `geochat` package on PYTHONPATH.

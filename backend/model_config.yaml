@@ -19,10 +19,16 @@ vqa_grounding:
   # need a grounding-trained checkpoint of its own (e.g.
   # RogerFerrod/GroundSet-LLaVA-1.6-7B) — a possible later addition.
   base_model: llava-hf/llava-1.5-7b-hf
-  # adapter_path is reported in `model_used`, not loaded — leave it unset until
-  # a fine-tuned adapter actually exists, e.g.:
-  # adapter_path: ./weights/adapters/geochat-lora-rsvqa
-  adapter_path: null
+  # A LoRA adapter applied on top of `base_model` at load time, and named in
+  # `model_used` so a trace says which weights answered. Relative paths resolve
+  # against the backend root, not the working directory. Set it to null to run
+  # the zero-shot base instead — the fastest way to A/B the fine-tune.
+  #
+  # eurosat_lora_v1_final is ours: r=16 / alpha=32 on q_proj and v_proj, tuned
+  # on EuroSAT scenes phrased as BigEarthNet-style land-cover questions. See
+  # the README's "The VQA checkpoint" for why EuroSAT stands in for
+  # BigEarthNet.txt here.
+  adapter_path: ./checkpoints/eurosat_lora_v1_final
   quantization: 4bit          # one of: none | 8bit | 4bit
   device: cuda:0              # one of: cpu | cuda | cuda:N | mps
 

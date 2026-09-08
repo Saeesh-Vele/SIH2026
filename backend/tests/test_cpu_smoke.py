@@ -44,8 +44,13 @@ def test_yaml_matches_default():
 
     cfg = yaml.safe_load((BACKEND / "model_config.yaml").read_text())
     assert cfg["vqa_grounding"]["base_model"] == "llava-hf/llava-1.5-7b-hf"
-    assert cfg["vqa_grounding"]["adapter_path"] is None
     assert set(cfg) == {t.value for t in TaskType}
+
+    # The fine-tuned adapter ships in the repo, so the configured path must
+    # actually be there — a dangling adapter_path only surfaces on the GPU box.
+    # `python backend/tests/verify_lora_adapter.py` checks its contents.
+    adapter = BACKEND / cfg["vqa_grounding"]["adapter_path"]
+    assert (adapter / "adapter_config.json").is_file(), adapter
 
 
 def test_registry_resolves_without_loading_weights():
@@ -59,7 +64,40 @@ def test_registry_resolves_without_loading_weights():
     engine = registry.get_model("vqa_grounding")
     assert isinstance(engine, GeoChatEngine)
     assert engine.loaded is False, "constructing the engine must not touch weights"
-    assert engine.model_used == "llava-hf/llava-1.5-7b-hf", engine.model_used
+    # The adapter is named in model_used because that string is what the
+    # execution trace records as having answered the question.
+    assert engine.model_used == (
+        "llava-hf/llava-1.5-7b-hf + eurosat_lora_v1_final"
+    ), engine.model_used
+
+
+def test_adapter_path_resolves_against_the_backend_root():
+    """Not the working directory — uvicorn gets started from either one."""
+    from app.models.geochat import BACKEND_ROOT, GeoChatConfig
+
+    relative = GeoChatConfig.from_mapping({"adapter_path": "./checkpoints/some-lora"})
+    assert relative.resolved_adapter_path == BACKEND_ROOT / "checkpoints" / "some-lora"
+
+    absolute = GeoChatConfig.from_mapping({"adapter_path": "/opt/loras/some-lora"})
+    assert absolute.resolved_adapter_path == Path("/opt/loras/some-lora")
+
+    assert GeoChatConfig.from_mapping({}).resolved_adapter_path is None
+
+
+def test_a_missing_adapter_is_reported_before_the_base_model_is_fetched():
+    """A typo in adapter_path should not cost a 14 GB download to discover."""
+    from app.models.geochat import GeoChatConfig, GeoChatEngine, ModelUnavailable
+
+    engine = GeoChatEngine(
+        GeoChatConfig(adapter_path="./checkpoints/does-not-exist", quantization="none"),
+        loader="llava",
+    )
+    try:
+        engine.load()
+    except ModelUnavailable as exc:
+        assert "adapter_config.json" in str(exc), exc
+    else:
+        raise AssertionError("expected ModelUnavailable for a missing adapter")
 
 
 def test_config_falls_back_to_default_model():
@@ -339,7 +377,9 @@ def test_vqa_node_degrades_when_the_model_cannot_load():
         )
     )
     assert out["status"] is QueryStatus.UNAVAILABLE, out
-    assert out["model_used"] == "llava-hf/llava-1.5-7b-hf", out["model_used"]
+    assert out["model_used"] == (
+        "llava-hf/llava-1.5-7b-hf + eurosat_lora_v1_final"
+    ), out["model_used"]
     assert out["steps"][0]["label"] == "Run VQA model", out["steps"]
 
 

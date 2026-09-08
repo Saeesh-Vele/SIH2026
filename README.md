@@ -152,9 +152,41 @@ to describe the whole scene. LLaVA-1.5 captions natively, which is why
 captioning — not grounding — is the second mandatory single-image task.
 
 The engine keeps a second loader path, `--loader geochat`, for GeoChat-format
-checkpoints — a fine-tuned adapter, say — and picks it automatically when the
-`geochat` package is importable. Nothing in the code is GeoChat-specific beyond
-that path and the grounding-token parser.
+checkpoints and picks it automatically when the `geochat` package is importable.
+Nothing in the code is GeoChat-specific beyond that path and the
+grounding-token parser.
+
+**The fine-tuned adapter.** `backend/checkpoints/eurosat_lora_v1_final/` is a
+LoRA adapter we trained on top of that base, and `vqa_grounding.adapter_path`
+points at it, so it is applied by default — `_apply_adapter` wraps the loaded
+model in `PeftModel` after whichever loader ran, and `model_used` reports
+`llava-hf/llava-1.5-7b-hf + eurosat_lora_v1_final` so the execution trace
+records which weights answered. It is 40 MB and versioned with the code rather
+than downloaded: a LoRA delta is meaningless apart from the commit it was tuned
+against. Set `adapter_path: null` to run the zero-shot base instead, which is
+the quickest way to A/B what the fine-tune bought.
+
+Trained with `peft` at r=16, alpha=32, dropout=0.05, targeting `q_proj` and
+`v_proj` — attention projections only, which is why it stays this small.
+
+*What it was trained on, and the honest caveat.* The data is **EuroSAT** scenes
+paired with questions phrased in the style of `BigEarthNet.txt` — land-cover
+questions of the kind the problem statement asks for, over imagery that
+supports them. EuroSAT is a proxy, chosen deliberately: BigEarthNet.txt itself
+needs a separate image-pairing pipeline to turn its multi-label patch
+annotations into image/question/answer triples, and that pipeline is not built
+here. EuroSAT ships as labelled single scenes, so the same question phrasing
+could be applied directly. What that buys is a model that answers land-cover
+questions in the expected register and vocabulary; what it does not buy is
+BigEarthNet's label granularity or its multi-label scenes. Treat this as a v1
+that proves the adapter path works end to end, not as a BigEarthNet result.
+
+Check the wiring without a GPU — path resolution, adapter metadata, base-model
+match, and that the registry hands back an engine carrying it:
+
+```bash
+python backend/tests/verify_lora_adapter.py
+```
 
 *Why not GeoChat itself.* GeoChat is a LLaVA-1.5 derivative and would be the
 better remote-sensing base, but `MBZUAI/geochat-7B` is not usable here today:
@@ -305,6 +337,19 @@ through their pure parts (the difference map, the fusion arithmetic, the
 verbalisation) and the nodes against recording stubs registered on the model
 registry, which is the same seam real checkpoints arrive through. Both files
 also run under `pytest backend/tests` if you have it installed.
+
+Beside them sit two checkpoint verifiers, named `verify_*` rather than `test_*`
+because they read real weights off disk instead of running dependency-free:
+
+```bash
+python backend/tests/verify_lora_adapter.py       # the VQA LoRA adapter's wiring
+python backend/tests/verify_fusion_checkpoint.py  # the two fusion encoders
+```
+
+`verify_lora_adapter.py` is CPU-only too — it resolves `adapter_path`, parses
+`adapter_config.json`, holds its `base_model_name_or_path` against
+`vqa_grounding.base_model`, and confirms the registry returns an engine
+reporting the adapter. No weights are loaded; that needs a GPU.
 
 ## Zero-shot inference test
 

@@ -14,12 +14,23 @@ backend/venv/
 .env
 .env.local
 
-# Checkpoints (large model files — handle separately, see note below)
-checkpoints/
+# Large model files. Pretrained encoders are downloaded, not versioned:
+# backend/weights/fusion/ holds ~350 MB of SSL4EO-S12 ViT-B/16 checkpoints.
+backend/weights/
 *.safetensors
 *.bin
 *.pth
-backend/weights/
+
+# ...with one exception. backend/checkpoints/ holds LoRA adapters we trained
+# ourselves — tens of MB, and the code is meaningless without the weights it
+# was tuned against, so they are versioned alongside it. No blanket
+# `checkpoints/` rule here on purpose: an excluded directory cannot be
+# re-included from inside, so the rule has to stay off the directory itself.
+!backend/checkpoints/**/*.safetensors
+!backend/checkpoints/**/*.bin
+
+# Archives the adapters were unpacked from — the unpacked copy is what ships.
+*.zip
 
 # OS
 .DS_Store
