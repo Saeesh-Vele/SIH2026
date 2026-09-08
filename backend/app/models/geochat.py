@@ -262,7 +262,7 @@ class GeoChatEngine:
     # -- inference --------------------------------------------------------
     def infer(
         self,
-        image_path: str | Path,
+        image_path: str | Path | Any,
         question: str,
         *,
         max_new_tokens: int | None = None,
@@ -274,6 +274,11 @@ class GeoChatEngine:
         Returns the shape every specialist node produces:
         ``{answer, evidence, confidence, model_used}``.
 
+        `image_path` may also be an already-open PIL image. The fusion node
+        passes one: its optical input is a multispectral GeoTIFF that PIL
+        cannot decode, so it renders a viewable composite and hands that over
+        rather than a path to bands this model could not read.
+
         `prompt` overrides the standard single-turn framing. The fusion node
         uses it to fold its sensor summary in beside the question; it must still
         carry exactly one image token.
@@ -283,7 +288,8 @@ class GeoChatEngine:
         import torch
         from PIL import Image
 
-        image = Image.open(image_path).convert("RGB")
+        source = image_path if isinstance(image_path, Image.Image) else Image.open(image_path)
+        image = source.convert("RGB")
         prompt = prompt or build_prompt(question)
         max_new = max_new_tokens or self.config.max_new_tokens
         temp = self.config.temperature if temperature is None else temperature

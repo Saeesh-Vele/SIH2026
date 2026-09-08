@@ -898,6 +898,131 @@ def test_validator_rejects_images_that_are_not_co_registered():
             assert "status" not in out, out
 
 
+# --------------------------------------------------------------------------
+# fusion — the RGB preview the VQA model is actually shown
+# --------------------------------------------------------------------------
+def _marked_scene(bands: int, size: int = 8):
+    """A (bands, h, w) raster where band `b` is the only one lit at column `b`.
+
+    Per-band contrast stretching erases any relationship between the bands'
+    values, so a marker is the only way to say which band came out where.
+    """
+    import numpy as np
+
+    scene = np.zeros((bands, size, size), dtype="uint16")
+    for band in range(bands):
+        scene[band, 0, band % size] = 1000
+    return scene
+
+
+def test_rgb_preview_composes_sentinel2_true_colour():
+    """13 bands in, three channels out, and B4/B3/B2 in the right order."""
+    try:
+        import numpy as np
+    except ImportError:  # pragma: no cover - depends on install
+        return
+
+    from app.models.fusion import rgb_preview
+
+    preview = rgb_preview(_marked_scene(13), 13)
+    assert preview.mode == "RGB", preview.mode
+    assert preview.size == (8, 8), preview.size
+
+    pixels = np.asarray(preview)
+    assert pixels.shape == (8, 8, 3), pixels.shape
+    assert pixels.dtype == np.uint8, pixels.dtype
+
+    # 1-indexed B4/B3/B2 are 0-indexed 3/2/1, and each marker lands in exactly
+    # one channel. B1 — aerosol, colourless — must not appear at all.
+    for channel, band in enumerate((3, 2, 1)):
+        lit = pixels[0, band, channel]
+        assert lit == 255, (channel, band, lit)
+        assert list(pixels[0, band]).count(255) == 1, pixels[0, band]
+    assert pixels[0, 0].tolist() == [0, 0, 0], "B1 is not part of true colour"
+
+
+def test_rgb_preview_falls_back_to_grey_for_sar():
+    """Two polarisations have no colour mapping; inventing one would be a lie."""
+    try:
+        import numpy as np
+    except ImportError:  # pragma: no cover - depends on install
+        return
+
+    from app.models.fusion import rgb_preview
+
+    preview = rgb_preview(_marked_scene(2), 2)
+    pixels = np.asarray(preview)
+    assert preview.mode == "RGB" and pixels.shape == (8, 8, 3), pixels.shape
+    # VV replicated across all three channels: grey, not a false colour.
+    assert (pixels[..., 0] == pixels[..., 1]).all() and (pixels[..., 1] == pixels[..., 2]).all()
+    assert pixels[0, 0].tolist() == [255, 255, 255], "VV is the band shown"
+    assert pixels[0, 1].tolist() == [0, 0, 0], "VH's marker must not leak in"
+
+    # A single-band raster arrives as (h, w) from tifffile, not (1, h, w).
+    flat = rgb_preview(np.asarray(_marked_scene(1))[0], 1)
+    assert np.asarray(flat).shape == (8, 8, 3)
+
+
+def test_rgb_preview_leaves_an_ordinary_image_alone():
+    """A 3-band PNG is already what the VQA model wants; nothing to render."""
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - depends on install
+        return
+
+    from app.models.fusion import rgb_preview
+
+    png = Image.new("RGB", (16, 16), (10, 20, 30))
+    assert rgb_preview(png, 3) is png, "an RGB image must pass through untouched"
+
+    # A greyscale PNG is viewable but not 3-channel; LLaVA needs the conversion.
+    grey = rgb_preview(Image.new("L", (16, 16), 128), 1)
+    assert grey.mode == "RGB" and grey.getpixel((0, 0)) == (128, 128, 128)
+
+
+def test_fusion_infer_shows_the_vqa_a_picture_not_thirteen_bands():
+    """The regression: PIL cannot open a 13-band GeoTIFF, so it must never see one."""
+    try:
+        import numpy as np
+        from PIL.Image import Image as PILImage
+    except ImportError:  # pragma: no cover - depends on install
+        return
+
+    from app.models import fusion as fusion_module
+    from app.models.fusion import FusionConfig, FusionEngine
+
+    scenes = {"optical.tif": (_marked_scene(13), 13), "sar.tif": (_marked_scene(2), 2)}
+
+    class _Engine(FusionEngine):
+        """Real reading and real verbalisation; only the weights are stubbed."""
+
+        def load(self) -> None:
+            self._encoders = {"optical": object(), "sar": object()}
+
+        def _embed_read(self, image, bands, modality):
+            assert isinstance(image, np.ndarray), (modality, type(image))
+            return [1.0, 0.0] if modality == "optical" else [0.6, 0.8]
+
+    vqa = _StubEngine({"answer": "Two vessels.", "confidence": 0.71, "evidence": []})
+    engine = _Engine(FusionConfig(), vqa=vqa)
+
+    original = fusion_module._read_bands
+    fusion_module._read_bands = lambda path: scenes[Path(path).name]
+    try:
+        out = engine.infer("/scenes/optical.tif", "/scenes/sar.tif", "How many vessels?")
+    finally:
+        fusion_module._read_bands = original
+
+    assert_contract(out)
+    assert out["answer"] == "Two vessels."
+    assert out["fused_width"] == 4, out["fused_width"]
+
+    (shown, question), _ = vqa.calls[0]
+    assert isinstance(shown, PILImage), f"the VQA model was handed a {type(shown)}"
+    assert shown.mode == "RGB" and shown.size == (8, 8), (shown.mode, shown.size)
+    assert question == "How many vessels?"
+
+
 def _main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     failures = []

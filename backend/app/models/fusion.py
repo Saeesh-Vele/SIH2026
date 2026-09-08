@@ -14,7 +14,9 @@ Four steps, and only the first needs weights of its own:
    statistics — which sensor dominates, whether the two agree — and render them
    as one sentence using the phrases in `feature_vocabulary`.
 4. **Answer.** Hand that sentence to the VQA model along with the optical image
-   and the user's question.
+   and the user's question. The VQA model sees a true-colour RGB rendering of
+   that image rather than its bands: it reads pictures, not multispectral
+   rasters, and `rgb_preview` is what makes one out of the other.
 
 Step 3 is the join between a vector nobody can read and a model that only reads
 text. It is deliberately a small, inspectable mapping rather than a learned
@@ -50,6 +52,14 @@ FUSION_STRATEGIES = ("concat", "cross_attention", "gated")
 #: The two halves, in the order they are concatenated. Optical first, so the
 #: fused vector's first half is always the modality the VQA model also sees.
 MODALITIES = ("optical", "sar")
+
+#: Sentinel-2 true colour, 1-indexed as the mission numbers its bands: B4 red,
+#: B3 green, B2 blue. Only meaningful for a raster in that band order.
+TRUE_COLOR_BANDS = (4, 3, 2)
+
+#: Band counts that carry the Sentinel-2 band order — L2A drops B10, L1C keeps
+#: it. Any other count is not assumed to be colour-mappable.
+SENTINEL2_BAND_COUNTS = (12, 13)
 
 #: Fallbacks when model_config.yaml supplies no `feature_vocabulary`. Keeping a
 #: default here means the node still says something honest if the block is
@@ -367,12 +377,20 @@ class FusionEngine:
         if modality not in MODALITIES:
             raise ValueError(f"unknown modality {modality!r}; expected one of {MODALITIES}")
         self.load()
+        image, bands = _read_bands(image_path)
+        return self._embed_read(image, bands, modality)
 
+    def _embed_read(self, image: Any, bands: int, modality: str) -> list[float]:
+        """`embed` for an image that has already been read off disk.
+
+        `infer` needs the optical bands twice — once for the encoder, once to
+        render the preview the VQA model looks at — and reading a multispectral
+        scene twice to get them is pure waste.
+        """
         import torch
 
         encoder = self._encoders[modality]
         _, expected = self.config.checkpoint_for(modality)
-        image, bands = _read_bands(image_path)
         if bands != expected:
             raise ModelUnavailable(
                 f"the {modality} image has {bands} band(s) but its encoder was pretrained "
@@ -402,17 +420,26 @@ class FusionEngine:
         Returns the shape every specialist produces:
         ``{answer, evidence, confidence, model_used}``. `evidence` is empty —
         fusion produces a described scene, not geometry.
+
+        The encoder and the VQA model see different renderings of the same
+        optical capture: all of its bands, and the true-colour preview
+        `rgb_preview` derives from them.
         """
         started = time.perf_counter()
-        optical = self.embed(optical_path, "optical")
+        self.load()
+        # Read once: the encoder needs every band, the VQA model needs a picture.
+        optical_image, optical_bands = _read_bands(optical_path)
+        optical = self._embed_read(optical_image, optical_bands, "optical")
         sar = self.embed(sar_path, "sar")
 
         fused = fuse_embeddings(optical, sar, self.config.fusion_strategy)
         stats = fusion_stats(optical, sar)
         description = describe_fusion(stats, self.config.feature_vocabulary)
 
+        # Not `optical_path`: a 13-band GeoTIFF is not an image PIL can open,
+        # and LLaVA has no way to look at raw multispectral data anyway.
         result = self.vqa.infer(
-            optical_path,
+            rgb_preview(optical_image, optical_bands),
             question,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -506,6 +533,67 @@ def _read_bands(image_path: str | Path) -> tuple[Any, int]:
             "a Sentinel-2 scene cannot be encoded."
         )
     return image, bands
+
+
+def rgb_preview(image: Any, bands: int) -> Any:
+    """Render something a VQA model can actually look at.
+
+    The encoder wants all 13 bands; LLaVA-family models want a picture. They
+    only ever see three channels of 8-bit colour, and PIL — which is what opens
+    the image on the VQA side — cannot even decode more than four bands, so a
+    Sentinel-2 scene has to be reduced before the question is asked.
+
+    Sentinel-2 becomes its true-colour composite: B4/B3/B2, the mission's own
+    1-indexed red, green and blue. Anything without a known colour mapping —
+    Sentinel-1's two polarisations, a single-band raster — becomes its first
+    band in grey, which is honest about showing one channel rather than
+    inventing a palette for bands that have no colour.
+
+    A PIL image is already viewable, so it is handed back untouched: a normal
+    3-band PNG is the same object for both the encoder and the VQA model.
+    """
+    from PIL import Image
+    from PIL.Image import Image as PILImage
+
+    if isinstance(image, PILImage):
+        return image if image.mode == "RGB" else image.convert("RGB")
+
+    import numpy as np
+
+    array = np.asarray(image)
+    if array.ndim == 2:
+        array = array[np.newaxis, ...]
+    if array.ndim != 3:
+        raise ValueError(f"expected a (bands, h, w) array for the preview, got {array.shape}")
+
+    if bands in SENTINEL2_BAND_COUNTS and array.shape[0] >= max(TRUE_COLOR_BANDS):
+        channels = [array[i - 1] for i in TRUE_COLOR_BANDS]
+    elif array.shape[0] >= 3:
+        # Already in view order — an RGB or RGBA raster, any extra band dropped.
+        channels = [array[i] for i in range(3)]
+    else:
+        channels = [array[0]] * 3
+
+    return Image.fromarray(np.stack([_stretch(c) for c in channels], axis=-1), mode="RGB")
+
+
+def _stretch(band: Any) -> Any:
+    """One band scaled to 0-255 over its 2nd-98th percentile.
+
+    Reflectance occupies a narrow slice of a 16-bit range, and a plain min-max
+    would let one bright pixel push the rest of the scene to black. Percentiles
+    are what every true-colour renderer uses for the same reason; the min-max
+    fallback covers a band flat enough that the two percentiles coincide.
+    """
+    import numpy as np
+
+    values = np.asarray(band, dtype="float32")
+    low, high = (float(v) for v in np.percentile(values, (2, 98)))
+    if high <= low:
+        low, high = float(values.min()), float(values.max())
+    if high <= low:
+        return np.zeros(values.shape, dtype="uint8")
+    return np.clip((values - low) / (high - low) * 255.0, 0, 255).astype("uint8")
 
 
 def _to_tensor(image: Any, bands: int, size: tuple[int, int], mean: tuple, std: tuple) -> Any:
