@@ -899,6 +899,85 @@ def test_validator_rejects_images_that_are_not_co_registered():
 
 
 # --------------------------------------------------------------------------
+# change — finding the vision tower the difference map reads
+# --------------------------------------------------------------------------
+class _FakeTower:
+    """Callable, because a tower that cannot be called is not the tower."""
+
+    def __call__(self, pixels, **kwargs):  # pragma: no cover - never invoked here
+        return pixels
+
+
+def test_vision_tower_is_found_wherever_transformers_keeps_it():
+    """The layout has moved once already; every layout seen so far must resolve."""
+    from types import SimpleNamespace
+
+    from app.models.change import vision_tower
+
+    tower = _FakeTower()
+
+    # transformers 5.x: LlavaForConditionalGeneration.model is a LlavaModel,
+    # and the tower hangs off that. This is the one 5.16.1 actually uses.
+    nested = SimpleNamespace(model=SimpleNamespace(vision_tower=tower, language_model=object()))
+    assert vision_tower(nested) is tower
+
+    # transformers 4.x kept it at the top level.
+    assert vision_tower(SimpleNamespace(vision_tower=tower)) is tower
+
+    # The LLaVA/GeoChat forks expose a method rather than an attribute.
+    assert vision_tower(SimpleNamespace(get_vision_tower=lambda: tower)) is tower
+
+    # A method that answers None — an offloaded tower — is not a tower either.
+    try:
+        vision_tower(SimpleNamespace(get_vision_tower=lambda: None, config=object()))
+    except ModelUnavailable as exc:
+        assert "no vision tower found" in str(exc), exc
+        assert "model.vision_tower" in str(exc), "the message must say where it looked"
+    else:
+        raise AssertionError("a missing tower must be reported, not returned as None")
+
+
+def test_vision_tower_resolves_on_the_installed_transformers():
+    """The mock above proves the search; this proves the paths still match reality.
+
+    Built from configs, so it needs no weights and no network — a randomly
+    initialised two-layer model has the same attribute layout as the 7B one.
+    """
+    try:
+        from transformers import (
+            CLIPVisionConfig,
+            LlamaConfig,
+            LlavaConfig,
+            LlavaForConditionalGeneration,
+        )
+    except ImportError:  # pragma: no cover - depends on install
+        return
+
+    from app.models.change import vision_tower
+
+    model = LlavaForConditionalGeneration(
+        LlavaConfig(
+            vision_config=CLIPVisionConfig(
+                hidden_size=32,
+                intermediate_size=37,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                image_size=32,
+                patch_size=16,
+            ),
+            text_config=LlamaConfig(
+                hidden_size=32,
+                intermediate_size=37,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                vocab_size=99,
+            ),
+        )
+    )
+    assert vision_tower(model) is model.model.vision_tower
+
+
+# --------------------------------------------------------------------------
 # fusion — the RGB preview the VQA model is actually shown
 # --------------------------------------------------------------------------
 def _marked_scene(bands: int, size: int = 8):

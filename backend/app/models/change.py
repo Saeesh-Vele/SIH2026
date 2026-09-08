@@ -199,6 +199,52 @@ def changed_fraction(scores: list[list[float]], threshold: float) -> float:
     return round(sum(1 for value in cells if value >= threshold) / len(cells), 4)
 
 
+#: Where a LLaVA-family checkpoint keeps its vision encoder, current layout
+#: first. transformers 5.x moved the core submodules down a level —
+#: `LlavaForConditionalGeneration.model` is a `LlavaModel`, and that is what
+#: owns the tower — where 4.x hung it straight off the top-level class.
+_VISION_TOWER_PATHS = ("model.vision_tower", "vision_tower")
+
+
+def vision_tower(model: Any) -> Any:
+    """The vision encoder inside a LLaVA-family model, wherever it now lives.
+
+    Nothing in transformers promises this location, and it has already moved
+    once: 5.16.1 answers to neither `model.vision_tower` nor the
+    `get_vision_tower()` the LLaVA repo defines, both of which used to work.
+    So the paths are tried in turn and a miss is reported as a
+    `ModelUnavailable` naming the class that was searched — an AttributeError
+    five frames into a diff says nothing about which layout arrived.
+    """
+    for path in _VISION_TOWER_PATHS:
+        found: Any = model
+        for attribute in path.split("."):
+            found = getattr(found, attribute, None)
+            if found is None:
+                break
+        if found is not None and callable(found):
+            return found
+
+    # The GeoChat fork and the original LLaVA repo expose a method instead.
+    getter = getattr(model, "get_vision_tower", None)
+    if callable(getter):
+        found = getter()
+        if found is not None:
+            return found
+
+    try:  # pragma: no cover - only for the message
+        from transformers import __version__ as transformers_version
+    except ImportError:  # pragma: no cover - unreachable once the model exists
+        transformers_version = "unknown"
+    raise ModelUnavailable(
+        f"no vision tower found on {type(model).__name__} (transformers "
+        f"{transformers_version}); looked at {', '.join(_VISION_TOWER_PATHS)} and "
+        "get_vision_tower(). The prompted diff reads patch features straight off "
+        "the encoder, so it needs the tower itself; if this checkpoint keeps it "
+        "somewhere else, add that path to _VISION_TOWER_PATHS."
+    )
+
+
 # --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
@@ -248,10 +294,8 @@ class ChangeDetectorEngine:
         pixels = processor.image_processor(images=images, return_tensors="pt")["pixel_values"]
         pixels = pixels.to(model.device, dtype=next(model.parameters()).dtype)
 
+        tower = vision_tower(model)
         with torch.inference_mode():
-            tower = model.get_vision_tower() if hasattr(model, "get_vision_tower") else None
-            if tower is None:
-                tower = model.vision_tower
             features = tower(pixels, output_hidden_states=False)
             features = getattr(features, "last_hidden_state", features)
 
