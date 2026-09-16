@@ -1,7 +1,8 @@
 "use client";
 
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Download } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Frame, FieldRow } from "@/components/frame";
@@ -189,6 +190,50 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
       ) : null}
 
       {ok ? <TaskReport result={result} panes={panes} summary={summary} /> : null}
+
+      {ok ? (
+        <div className="pt-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const reportData = {
+                report_title: "SatQuery AI Remote-Sensing Analysis Report",
+                generated_at: new Date().toISOString(),
+                query_id: result.queryId,
+                trace_id: result.traceId,
+                status: result.status,
+                task_selected: result.taskSelected,
+                intent: result.intent,
+                answer: result.answer,
+                confidence_score: result.confidence,
+                models_used: result.modelsUsed,
+                bound_scenes: panes.map((p) => ({
+                  scene_id: p.meta.sceneId,
+                  role: p.meta.role,
+                  size_bytes: p.meta.sizeBytes,
+                  content_type: p.meta.contentType,
+                })),
+                visual_evidence: result.overlays,
+                metrics: result.metrics,
+              };
+              const blob = new Blob([JSON.stringify(reportData, null, 2)], {
+                type: "application/json",
+              });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `satquery-report-${result.queryId.slice(0, 8)}.json`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            className="h-7 w-full gap-2 rounded-sm border-rule bg-raised font-mono text-[11px] text-foreground hover:border-signal/50 hover:bg-signal/10 hover:text-signal"
+          >
+            <Download className="size-3.5" />
+            Download Analysis Report (.json)
+          </Button>
+        </div>
+      ) : null}
     </>
   );
 }
