@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.models.geochat import GeoChatConfig, GeoChatEngine, ModelUnavailable
+from app.models.geochat import GeoChatConfig, GeoChatEngine, ModelUnavailable, read_cpu_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,9 @@ class FusionConfig:
     feature_vocabulary: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_VOCABULARY))
     max_new_tokens: int = 256
     temperature: float = 0.2
+    #: `vqa_grounding.cpu_fallback.enabled`, copied in by the registry. Only the
+    #: VQA half can fall back; the encoders still need their real weights.
+    cpu_fallback_enabled: bool = False
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "FusionConfig":
@@ -128,6 +131,7 @@ class FusionConfig:
             feature_vocabulary=vocabulary,
             max_new_tokens=int(raw.get("max_new_tokens", 256)),
             temperature=float(raw.get("temperature", 0.2)),
+            cpu_fallback_enabled=read_cpu_fallback(raw),
         )
 
     def as_vqa_config(self) -> GeoChatConfig:
@@ -136,6 +140,7 @@ class FusionConfig:
             device=self.device,
             max_new_tokens=self.max_new_tokens,
             temperature=self.temperature,
+            cpu_fallback_enabled=self.cpu_fallback_enabled,
         )
 
     def checkpoint_for(self, modality: str) -> tuple[str | None, int]:
@@ -266,12 +271,15 @@ class FusionEngine:
         return set(self._encoders) >= set(MODALITIES)
 
     @property
-    def model_used(self) -> str:
+    def encoders_used(self) -> str:
         return (
             f"{self.config.encoder} (optical {self.config.optical_in_chans}b + "
-            f"SAR {self.config.sar_in_chans}b, {self.config.fusion_strategy}) + "
-            f"{self.config.base_model}"
+            f"SAR {self.config.sar_in_chans}b, {self.config.fusion_strategy})"
         )
+
+    @property
+    def model_used(self) -> str:
+        return f"{self.encoders_used} + {self.config.base_model}"
 
     # -- loading ----------------------------------------------------------
     def _load_one(self, modality: str) -> Any:
@@ -446,11 +454,18 @@ class FusionEngine:
             prompt=build_fusion_prompt(description, question),
         )
 
+        # A degraded VQA answer came from the CPU fallback, not base_model, so
+        # the trace names what actually answered.
+        degraded = bool(result.get("degraded"))
         return {
             "answer": result["answer"],
             "evidence": [],
             "confidence": result["confidence"],
-            "model_used": self.model_used,
+            "model_used": (
+                f"{self.encoders_used} + {result['model_used']}" if degraded else self.model_used
+            ),
+            "degraded": degraded,
+            "degraded_reason": result.get("degraded_reason") if degraded else None,
             "fusion_description": description,
             "fusion_stats": stats,
             "fused_width": len(fused),

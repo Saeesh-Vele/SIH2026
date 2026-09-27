@@ -18,6 +18,7 @@ importable.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -52,6 +53,51 @@ _BOX_RE = re.compile(
 )
 
 
+#: Set to 1/true/yes/on (or 0/false/no/off) to override
+#: `vqa_grounding.cpu_fallback.enabled` on a demo machine without editing the YAML.
+CPU_FALLBACK_ENV = "SATQUERY_CPU_FALLBACK"
+
+#: What a fallback answer is attributed to. Never the fine-tuned LLaVA or its
+#: adapter — those did not run.
+CPU_FALLBACK_MODEL = "cpu_spectral_fallback (Salesforce/blip-vqa-base)"
+BLIP_VQA_MODEL = "Salesforce/blip-vqa-base"
+
+#: Appended to ModelUnavailable when the fallback is off, so the opt-in is
+#: discoverable from the trace rather than only from the README.
+CPU_FALLBACK_HINT = (
+    "(A CPU demo fallback exists but is off: set vqa_grounding.cpu_fallback.enabled "
+    f"in model_config.yaml or {CPU_FALLBACK_ENV}=1. It does not use the fine-tuned model.)"
+)
+
+
+def cpu_fallback_allowed(configured: bool) -> bool:
+    """The YAML value, unless SATQUERY_CPU_FALLBACK overrides it.
+
+    Read at load time rather than at config parse, so the env var reaches every
+    engine that wraps the VQA model however it was constructed.
+    """
+    raw = os.environ.get(CPU_FALLBACK_ENV, "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return configured
+
+
+def read_cpu_fallback(raw: dict[str, Any]) -> bool:
+    """`cpu_fallback.enabled` from a config block; off when absent."""
+    block = raw.get("cpu_fallback") or {}
+    return bool(block.get("enabled", False)) if isinstance(block, dict) else False
+
+
+def _short_reason(exc: BaseException) -> str:
+    """The first clause of a load failure, for the trace's degraded_reason."""
+    text = str(exc).strip()
+    for sep in (" — ", "; ", ". "):
+        text = text.split(sep, 1)[0]
+    return text[:160] or type(exc).__name__
+
+
 class ModelUnavailable(RuntimeError):
     """Raised when the checkpoint cannot be loaded on this machine.
 
@@ -70,7 +116,9 @@ class GeoChatConfig:
     device: str = "cuda:0"
     max_new_tokens: int = 256
     temperature: float = 0.2
-    enable_cpu_fallback: bool = True
+    #: `cpu_fallback.enabled`. Off by default: a missing GPU is reported, not
+    #: worked around. See `cpu_fallback_allowed` for the env override.
+    cpu_fallback_enabled: bool = False
 
     @property
     def resolved_adapter_path(self) -> Path | None:
@@ -89,7 +137,7 @@ class GeoChatConfig:
             device=raw.get("device", "cuda:0"),
             max_new_tokens=int(raw.get("max_new_tokens", 256)),
             temperature=float(raw.get("temperature", 0.2)),
-            enable_cpu_fallback=bool(raw.get("enable_cpu_fallback", True)),
+            cpu_fallback_enabled=read_cpu_fallback(raw),
         )
 
 
@@ -152,10 +200,20 @@ class GeoChatEngine:
         self._processor: Any = None
         self._use_geochat = False
         self._fallback_mode = False
+        self._fallback_reason: str | None = None
 
     @property
     def loaded(self) -> bool:
         return self._model is not None
+
+    @property
+    def degraded(self) -> bool:
+        """True once load() has fallen back to the CPU demo model."""
+        return self._fallback_mode
+
+    @property
+    def fallback_reason(self) -> str | None:
+        return self._fallback_reason
 
     @property
     def model_used(self) -> str:
@@ -223,19 +281,36 @@ class GeoChatEngine:
         )
 
     def load(self) -> None:
-        """Bring the checkpoint into memory. Raises ModelUnavailable on a bad env."""
+        """Bring the checkpoint into memory. Raises ModelUnavailable on a bad env.
+
+        With `cpu_fallback` enabled, a load failure switches this engine to the
+        CPU demo model instead; every answer it gives afterwards is marked
+        degraded and never attributed to the configured checkpoint.
+        """
         if self.loaded or self._fallback_mode:
             return
 
         try:
             self._preflight()
+            self._load_checkpoint()
         except ModelUnavailable as exc:
-            if self.config.enable_cpu_fallback:
-                logger.warning("GPU/weights unavailable (%s); activating CPU spectral vision fallback.", exc)
-                self._fallback_mode = True
+            if cpu_fallback_allowed(self.config.cpu_fallback_enabled):
+                self._enter_fallback(exc)
                 return
-            raise
+            raise ModelUnavailable(f"{exc} {CPU_FALLBACK_HINT}") from exc
 
+    def _enter_fallback(self, exc: BaseException) -> None:
+        self._fallback_mode = True
+        self._fallback_reason = _short_reason(exc)
+        logger.warning(
+            "%s unavailable (%s); cpu_fallback is enabled, answering with %s. "
+            "Results are marked degraded.",
+            self.config.base_model,
+            exc,
+            CPU_FALLBACK_MODEL,
+        )
+
+    def _load_checkpoint(self) -> None:
         use_geochat = self.loader == "geochat"
         if self.loader == "auto":
             try:
@@ -253,17 +328,9 @@ class GeoChatEngine:
             else:
                 self._load_llava()
             self._apply_adapter()
-        except ModelUnavailable as exc:
-            if self.config.enable_cpu_fallback:
-                logger.warning("GPU/weights unavailable (%s); activating CPU spectral vision fallback.", exc)
-                self._fallback_mode = True
-                return
+        except ModelUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - surface any load failure as one type
-            if self.config.enable_cpu_fallback:
-                logger.warning("Loading failed (%s); activating CPU spectral vision fallback.", exc)
-                self._fallback_mode = True
-                return
             raise ModelUnavailable(f"could not load {self.config.base_model}: {exc}") from exc
 
         logger.info(
@@ -440,20 +507,33 @@ class GeoChatEngine:
         }
 
     def _get_blip(self):
-        if not hasattr(self, "_blip_model") or self._blip_model is None:
+        """Load the fallback's BLIP VQA model once.
+
+        A failure here is not papered over with a statistics-only answer: the
+        trace would then name a model that never ran.
+        """
+        if getattr(self, "_blip_model", None) is None:
             try:
-                from transformers import BlipProcessor, BlipForQuestionAnswering
-                self._blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-vqa-base")
-                self._blip_model = BlipForQuestionAnswering.from_pretrained("Salesforce/blip-vqa-base")
+                from transformers import BlipForQuestionAnswering, BlipProcessor
+
+                self._blip_processor = BlipProcessor.from_pretrained(BLIP_VQA_MODEL)
+                self._blip_model = BlipForQuestionAnswering.from_pretrained(BLIP_VQA_MODEL)
                 self._blip_model.eval()
-            except Exception as e:
-                logger.warning("BLIP VQA load failed: %s", e)
+            except Exception as exc:  # noqa: BLE001 - reported as one type
                 self._blip_model = None
                 self._blip_processor = None
-        return getattr(self, "_blip_processor", None), getattr(self, "_blip_model", None)
+                raise ModelUnavailable(
+                    f"cpu_fallback is enabled but {BLIP_VQA_MODEL} could not load: {exc}"
+                ) from exc
+        return self._blip_processor, self._blip_model
 
     def _infer_spectral_fallback(self, image_path: str | Path | Any, question: str) -> dict[str, Any]:
-        """Dynamic neural Vision + Spectral analysis for any bound satellite image."""
+        """CPU demo answer: band statistics plus a small general-purpose VQA model.
+
+        Opt-in only (`cpu_fallback`). The result is marked `degraded`, carries
+        no confidence — nothing here measures one — and no grounding boxes,
+        since nothing here localises anything.
+        """
         import numpy as np
         from PIL import Image
 
@@ -530,16 +610,12 @@ class GeoChatEngine:
         built_ratio = float(np.mean((r_f > 130) & (g_f > 130) & (b_f > 130))) * 100.0
         soil_ratio = max(0.0, 100.0 - veg_ratio - water_ratio - built_ratio)
 
-        # 1. Run Neural Vision Model (BLIP VQA)
-        blip_observation = ""
+        # 1. Run the small VQA model. Load failures raise ModelUnavailable;
+        # inference errors propagate to the node like any other.
         processor, blip_model = self._get_blip()
-        if processor is not None and blip_model is not None:
-            try:
-                inputs = processor(pil_img, question, return_tensors="pt")
-                out = blip_model.generate(**inputs, max_new_tokens=45)
-                blip_observation = processor.decode(out[0], skip_special_tokens=True).strip()
-            except Exception as e:
-                logger.warning("BLIP inference error: %s", e)
+        inputs = processor(pil_img, question, return_tensors="pt")
+        out = blip_model.generate(**inputs, max_new_tokens=45)
+        blip_observation = processor.decode(out[0], skip_special_tokens=True).strip()
 
         # 2. Dynamic Land Cover Classification
         if veg_ratio > 60 or mean_ndvi > 0.35:
@@ -555,32 +631,7 @@ class GeoChatEngine:
             primary_label = "Agricultural / Open Terrain"
             land_desc = f"cultivated terrain / open ground ({soil_ratio:.1f}% soil/open cover)"
 
-        # 3. Dynamic Bounding Box Overlay
-        boxes: list[dict[str, Any]] = []
-        if veg_ratio > 50:
-            boxes.append({
-                "kind": "box",
-                "id": "b0",
-                "label": f"{primary_label} ({int(veg_ratio)}% area)",
-                "confidence": 0.94,
-                "x": 0.08,
-                "y": 0.08,
-                "w": 0.84,
-                "h": 0.84,
-            })
-        else:
-            boxes.append({
-                "kind": "box",
-                "id": "b0",
-                "label": f"{primary_label} zone",
-                "confidence": 0.91,
-                "x": 0.15,
-                "y": 0.15,
-                "w": 0.70,
-                "h": 0.70,
-            })
-
-        # 4. Generate Dynamic Multi-Modal Response
+        # 3. Generate Dynamic Multi-Modal Response
         q_lower = question.lower()
         obs_text = f"Visual reasoning identifies: '{blip_observation}'." if blip_observation else ""
 
@@ -590,41 +641,37 @@ class GeoChatEngine:
                 f"Spectral vegetation index is measured at NDVI={mean_ndvi:.2f} with surface texture complexity of {edge_density:.1f} "
                 f"across the {width}x{height} capture."
             )
-            confidence = 0.93
         elif any(w in q_lower for w in ["land cover", "classification", "type of land", "category", "class"]):
             answer = (
                 f"Classification: {primary_label}. {obs_text} "
                 f"Composition: {veg_ratio:.1f}% vegetation, {water_ratio:.1f}% water/shadow, {built_ratio:.1f}% built, {soil_ratio:.1f}% soil/open. "
                 f"Analyzed {band_count} spectral bands (NDVI: {mean_ndvi:.2f})."
             )
-            confidence = 0.95
         elif any(w in q_lower for w in ["how many", "count"]):
             if blip_observation and blip_observation.lower() not in ["none", "no", "0"]:
                 answer = f"Visual detection: {blip_observation}. Analyzed across the {width}x{height} scene."
             else:
                 answer = f"The {width}x{height} footprint represents continuous {primary_label.lower()} ({land_desc}); no discrete target objects to count."
-            confidence = 0.90
         elif any(w in q_lower for w in ["is there", "are there", "does it have"]):
             if blip_observation:
                 answer = f"{blip_observation.capitalize()}. Surface properties: {land_desc} across the {width}x{height} area."
             else:
                 answer = f"Analysis confirms {primary_label.lower()} ({land_desc})."
-            confidence = 0.92
         else:
             answer = (
                 f"{obs_text} Spectral analysis indicates {primary_label.lower()} ({land_desc}) "
                 f"with NDVI={mean_ndvi:.2f} and {band_count} spectral channels."
             )
-            confidence = 0.91
 
-        duration_ms = max(int((time.perf_counter() - started) * 1000), 120)
-        model_name = "Salesforce/blip-vqa-base + SatQuery Spectral Engine"
+        duration_ms = int((time.perf_counter() - started) * 1000)
 
         return {
             "answer": answer.strip(),
-            "evidence": boxes,
-            "confidence": round(confidence, 2),
-            "model_used": model_name,
+            "evidence": [],
+            "confidence": None,
+            "model_used": CPU_FALLBACK_MODEL,
+            "degraded": True,
+            "degraded_reason": self._fallback_reason,
             "raw": answer,
             "tokens": len(answer.split()),
             "duration_ms": duration_ms,

@@ -82,7 +82,12 @@ export interface QueryResult {
   intent: Intent | null;
   taskSelected: TaskType;
   answer: string;
-  confidence: number;
+  /** Null exactly when `degraded`: a CPU-fallback answer has no measured confidence. */
+  confidence: number | null;
+  /** The answer came from the opt-in CPU fallback, not the configured model. */
+  degraded: boolean;
+  /** Why the configured model did not run, when `degraded`. */
+  degradedReason: string | null;
   overlays: Overlay[];
   modelsUsed: string[];
   steps: TraceStep[];

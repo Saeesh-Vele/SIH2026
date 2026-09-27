@@ -84,7 +84,9 @@ interface QueryResponseJson {
   intent: Intent | null;
   task_selected: QueryResult["taskSelected"];
   answer: string;
-  confidence: number;
+  confidence: number | null;
+  degraded: boolean;
+  degraded_reason: string | null;
   overlays: QueryResult["overlays"];
   models_used: string[];
   metrics: { label: string; value: string }[];
@@ -101,6 +103,8 @@ function toResult(json: QueryResponseJson): QueryResult {
     taskSelected: json.task_selected,
     answer: json.answer,
     confidence: json.confidence,
+    degraded: json.degraded,
+    degradedReason: json.degraded_reason,
     overlays: json.overlays ?? [],
     modelsUsed: json.models_used ?? [],
     metrics: json.metrics ?? [],

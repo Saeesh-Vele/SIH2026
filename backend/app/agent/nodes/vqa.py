@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any
 
-from app.agent.state import GraphState, elapsed_ms, step
+from app.agent.state import GraphState, degraded_detail, elapsed_ms, honesty_fields, step
 from app.core.model_registry import get_registry
 from app.models.geochat import ModelUnavailable
 from app.models.schemas import Intent, QueryStatus, TraceStepStatus
@@ -54,6 +54,7 @@ async def vqa_grounding_node(state: GraphState) -> dict[str, Any]:
             max_new_tokens=state.get("parameters", {}).get("max_new_tokens"),
             temperature=state.get("parameters", {}).get("temperature"),
         )
+        fields = honesty_fields(result)
     except ModelUnavailable as exc:
         logger.info("vqa model unavailable: %s", exc)
         return {
@@ -82,14 +83,14 @@ async def vqa_grounding_node(state: GraphState) -> dict[str, Any]:
     return {
         "answer": result["answer"],
         "evidence": evidence,
-        "confidence": float(result.get("confidence", 0.0)),
+        **fields,
         "model_used": result.get("model_used", "vqa_grounding"),
         "metrics": metrics,
         "steps": [
             step(
                 "Run VQA model",
                 TraceStepStatus.COMPLETE,
-                f"{result.get('tokens', 0)} tokens, {len(evidence)} box(es)",
+                degraded_detail(f"{result.get('tokens', 0)} tokens, {len(evidence)} box(es)", fields),
                 duration_ms,
             )
         ],

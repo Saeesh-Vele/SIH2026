@@ -31,8 +31,14 @@ vqa_grounding:
   adapter_path: ./checkpoints/eurosat_lora_v1_final
   quantization: 4bit          # one of: none | 8bit | 4bit
   device: cuda:0              # one of: cpu | cuda | cuda:N | mps
-
-# Prompted diff: the VQA model's own vision tower supplies the patch features
+  # When the checkpoint above cannot load (no CUDA GPU, missing weights), the
+  # run is reported UNAVAILABLE. This opt-in swaps in a small CPU model instead,
+  # for demo machines only. Such answers are marked degraded in the trace and
+  # UI, carry no confidence, and are never attributed to LLaVA or the adapter.
+  # Also covers change_detection and the VQA half of optical_sar_fusion.
+  # SATQUERY_CPU_FALLBACK=1 (or 0) overrides this without editing the file.
+  cpu_fallback:
+    enabled: false   # opt-in demo safety net; when true, answers come from a small CPU model, NOT the fine-tuned LLaVA: the VQA model's own vision tower supplies the patch features
 # that locate the change, and the VQA model then describes it from both frames.
 # No second checkpoint — swapping base_model swaps both halves at once.
 change_detection:

@@ -100,15 +100,33 @@ function EmptyState({ hasScene }: { hasScene: boolean }) {
 function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
   const failed = result.status !== "ok" ? result.status : null;
   const ok = failed === null;
-  const confidencePct = Math.round(result.confidence * 100);
+  // Null only on a degraded (CPU-fallback) run: there is no measured value to
+  // draw, so the bar is omitted rather than drawn at zero.
+  const confidence = result.confidence;
   const summary = result.metrics.find((m) => m.label === SUMMARY_METRIC)?.value ?? null;
   const rowMetrics = result.metrics.filter((m) => m.label !== SUMMARY_METRIC);
   const tone =
-    result.confidence >= 0.8 ? "signal" : result.confidence >= 0.6 ? "caution" : "alarm";
+    confidence === null
+      ? null
+      : confidence >= 0.8
+        ? "signal"
+        : confidence >= 0.6
+          ? "caution"
+          : "alarm";
 
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
+        {result.degraded ? (
+          <Badge
+            variant="outline"
+            title={result.degradedReason ?? undefined}
+            className="gap-1 rounded-sm border-caution bg-caution/15 px-1.5 font-mono text-[10px] text-caution"
+          >
+            <AlertTriangle className="size-3" />
+            Degraded mode — CPU fallback
+          </Badge>
+        ) : null}
         {result.intent ? (
           <Badge
             variant="outline"
@@ -151,7 +169,17 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
         </div>
       )}
 
-      {ok ? (
+      {ok && confidence === null ? (
+        <div className="flex items-baseline justify-between font-mono text-[10px]">
+          <span className="text-muted-foreground">confidence</span>
+          <span className="text-caution">
+            not measured — CPU fallback
+            {result.degradedReason ? ` (${result.degradedReason})` : ""}
+          </span>
+        </div>
+      ) : null}
+
+      {ok && confidence !== null ? (
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between font-mono text-[10px]">
             <span className="text-muted-foreground">
@@ -165,11 +193,11 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
                 tone === "alarm" && "text-alarm",
               )}
             >
-              {result.confidence.toFixed(2)}
+              {confidence.toFixed(2)}
             </span>
           </div>
           <Progress
-            value={confidencePct}
+            value={Math.round(confidence * 100)}
             className="h-1 rounded-none bg-raised"
             indicatorClassName={cn(
               "rounded-none",
@@ -206,7 +234,10 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
                 task_selected: result.taskSelected,
                 intent: result.intent,
                 answer: result.answer,
+                // null on a degraded run, alongside the flag that explains it.
                 confidence_score: result.confidence,
+                degraded: result.degraded,
+                degraded_reason: result.degradedReason,
                 models_used: result.modelsUsed,
                 bound_scenes: panes.map((p) => ({
                   scene_id: p.meta.sceneId,

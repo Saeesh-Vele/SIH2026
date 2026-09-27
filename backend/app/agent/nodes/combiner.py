@@ -31,6 +31,9 @@ async def output_combiner(state: GraphState) -> dict[str, Any]:
     # knows how to render. Non-geometric evidence stays out of it.
     overlays = [item for item in evidence if item.get("kind") in {"box", "mask"}]
 
+    ok = status == QueryStatus.OK
+    degraded = ok and bool(state.get("degraded"))
+
     models_used = [m for m in (state.get("model_used"),) if m]
     if state.get("intent_model"):
         models_used.insert(0, f"{state['intent_model']} (intent)")
@@ -39,7 +42,11 @@ async def output_combiner(state: GraphState) -> dict[str, Any]:
         "status": status,
         "answer": answer,
         "evidence": evidence,
-        "confidence": state.get("confidence", 0.0) if status == QueryStatus.OK else 0.0,
+        # None survives as None: a degraded (CPU-fallback) answer has no
+        # measured confidence, and 0.0 would read as one.
+        "confidence": state.get("confidence", 0.0) if ok else 0.0,
+        "degraded": degraded,
+        "degraded_reason": state.get("degraded_reason") if degraded else None,
         "metrics": state.get("metrics", []),
         "model_used": state.get("model_used", ""),
         "steps": [
@@ -49,6 +56,7 @@ async def output_combiner(state: GraphState) -> dict[str, Any]:
                 "Combine output",
                 TraceStepStatus.COMPLETE,
                 f"status {status.value}"
+                + (" (DEGRADED — CPU fallback)" if degraded else "")
                 + (f", {len(overlays)} overlay(s)" if overlays else "")
                 + (f" — {'; '.join(models_used)}" if models_used else ""),
                 elapsed_ms(started),

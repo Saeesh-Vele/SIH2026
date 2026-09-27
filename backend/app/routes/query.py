@@ -45,6 +45,8 @@ def _to_response(state: dict[str, Any]) -> QueryResponse:
         task_selected=task or TaskType.VQA_GROUNDING,
         answer=state.get("answer", ""),
         confidence=state.get("confidence", 0.0),
+        degraded=bool(state.get("degraded", False)),
+        degraded_reason=state.get("degraded_reason"),
         overlays=[item for item in evidence if item.get("kind") in {"box", "mask"}],
         models_used=[m for m in (state.get("model_used"),) if m],
         metrics=state.get("metrics", []),

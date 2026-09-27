@@ -87,6 +87,10 @@ class ModelRegistry:
             return self._cache[task_name]
 
         config = self.config_for(task_name)
+        # The CPU fallback is declared once, under vqa_grounding, and applies
+        # to every engine that wraps the VQA model.
+        if task_name != "vqa_grounding" and "cpu_fallback" not in config:
+            config["cpu_fallback"] = self._config.get("vqa_grounding", {}).get("cpu_fallback")
         loader = self._loaders.get(task_name)
         if loader is None:
             logger.info("no loader registered for %r — returning mock", task_name)

@@ -117,6 +117,14 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload    # http://localhost:8000/docs
 ```
 
+`requirements.txt` is the web service only. It starts and serves without the
+inference stack, reporting each specialist as unavailable. To run the models
+(torch, transformers, bitsandbytes, and peft for the LoRA adapter), also:
+
+```bash
+pip install -r ../scripts/requirements.txt
+```
+
 MongoDB is optional at boot — the service starts without it and `/health`
 reports `mongo: false`. Point it elsewhere with `SATQUERY_MONGO_URI`; see
 `.env.example` for the full set of `SATQUERY_`-prefixed settings.
@@ -124,7 +132,7 @@ reports `mongo: false`. Point it elsewhere with `SATQUERY_MONGO_URI`; see
 **Collections**
 
 - `query_history` — query text, timestamp, task_type, asset ids
-- `execution_traces` — task_selected, models_used, parameters, confidence, steps, timestamp
+- `execution_traces` — task_selected, models_used, parameters, confidence, degraded, degraded_reason, steps, timestamp
 - `uploads` — staged assets per upload id
 
 **Endpoints**
@@ -324,19 +332,52 @@ vqa_grounding:
 SATQUERY_MODEL_CONFIG_PATH=./model_config.local.yaml uvicorn app.main:app --reload
 ```
 
+### CPU fallback (opt-in)
+
+A demo safety net for machines where the checkpoint cannot load: no CUDA GPU,
+missing weights. **Off by default**. Without it, such a run is reported
+`unavailable` in the trace, which is the point: a missing GPU is an
+environment fact, not something to paper over.
+
+```yaml
+vqa_grounding:
+  cpu_fallback:
+    enabled: true
+```
+
+or `SATQUERY_CPU_FALLBACK=1` on the demo machine (`=0` forces it off). One
+switch covers every engine that wraps the VQA model:
+
+- **VQA / captioning** answers with `Salesforce/blip-vqa-base` plus band
+  statistics, on CPU.
+- **Change detection** uses a raw RGB pixel difference and a templated sentence
+  instead of the vision-tower diff and the model's description.
+- **Fusion** still needs its real encoder weights; only its VQA half falls back.
+
+This **bypasses the fine-tuned model entirely**: neither LLaVA nor the
+`eurosat_lora_v1_final` adapter runs. Every fallback answer says so. The response
+and the stored trace carry `degraded: true` and a `degraded_reason`,
+`models_used` names the fallback (e.g. `cpu_spectral_fallback
+(Salesforce/blip-vqa-base)`) and never LLaVA, `confidence` is `null` because
+nothing measured one, and the step detail starts with `DEGRADED`. The console
+shows a *Degraded mode — CPU fallback* badge. The first fallback query downloads
+BLIP (~1.4 GB) unless it is already cached.
+
 ## Tests
 
 ```bash
 python backend/tests/test_cpu_smoke.py      # graph paths, upload validation, routing
 python backend/tests/test_specialists.py    # change detection, fusion, dispatch
+python backend/tests/test_cpu_fallback.py   # the opt-in CPU fallback stays off, and honest when on
 ```
 
 CPU only, and dependency-free beyond what the app already needs — no GPU, no
 MongoDB, no OpenRouter key, no network, no weights. Engines are exercised
 through their pure parts (the difference map, the fusion arithmetic, the
 verbalisation) and the nodes against recording stubs registered on the model
-registry, which is the same seam real checkpoints arrive through. Both files
-also run under `pytest backend/tests` if you have it installed.
+registry, which is the same seam real checkpoints arrive through. The fallback
+suite stubs BLIP and blocks every socket connect, so a stray download fails the
+test rather than quietly succeeding. All three files also run under `pytest backend/tests` if you have it installed.
 
 Beside them sit two checkpoint verifiers, named `verify_*` rather than `test_*`
 because they read real weights off disk instead of running dependency-free:
