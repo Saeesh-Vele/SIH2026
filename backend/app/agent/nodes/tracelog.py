@@ -71,6 +71,8 @@ async def trace_logger(state: GraphState) -> dict[str, Any]:
             "intent_confidence": state.get("intent_confidence"),
         },
         confidence=state.get("confidence", 0.0),
+        degraded=bool(state.get("degraded", False)),
+        degraded_reason=state.get("degraded_reason"),
         steps=list(state.get("steps", [])),
         timestamp=now,
     )

@@ -15,4 +15,5 @@ httpx>=0.27
 # without it, reporting the specialist as unavailable. To actually run the VQA
 # model, also install scripts/requirements.txt (torch, transformers,
 # bitsandbytes).
-rasterio
+# GeoTIFF band reading: fusion inputs, and the opt-in CPU fallback.
+rasterio>=1.3

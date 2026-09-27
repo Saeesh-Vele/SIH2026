@@ -12,7 +12,14 @@ import logging
 import time
 from typing import Any
 
-from app.agent.state import GraphState, asset_by_role, elapsed_ms, step
+from app.agent.state import (
+    GraphState,
+    asset_by_role,
+    degraded_detail,
+    elapsed_ms,
+    honesty_fields,
+    step,
+)
 from app.core.model_registry import get_registry
 from app.models.geochat import ModelUnavailable
 from app.models.schemas import QueryStatus, TraceStepStatus
@@ -54,6 +61,7 @@ async def change_node(state: GraphState) -> dict[str, Any]:
             max_new_tokens=state.get("parameters", {}).get("max_new_tokens"),
             temperature=state.get("parameters", {}).get("temperature"),
         )
+        fields = honesty_fields(result)
     except ModelUnavailable as exc:
         logger.info("change detection unavailable: %s", exc)
         return {
@@ -85,15 +93,18 @@ async def change_node(state: GraphState) -> dict[str, Any]:
     return {
         "answer": result["answer"],
         "evidence": evidence,
-        "confidence": float(result.get("confidence", 0.0)),
+        **fields,
         "model_used": result.get("model_used", "change_detection"),
         "metrics": metrics,
         "steps": [
             step(
                 STEP_LABEL,
                 TraceStepStatus.COMPLETE,
-                f"{len(evidence)} changed region(s)"
-                + (f", {changed * 100:.1f}% of scene" if changed is not None else ""),
+                degraded_detail(
+                    f"{len(evidence)} changed region(s)"
+                    + (f", {changed * 100:.1f}% of scene" if changed is not None else ""),
+                    fields,
+                ),
                 duration_ms,
             )
         ],

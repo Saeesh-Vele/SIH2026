@@ -31,7 +31,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from app.models.geochat import VICUNA_SYSTEM, GeoChatConfig, GeoChatEngine, ModelUnavailable
+from app.models.geochat import (
+    VICUNA_SYSTEM,
+    GeoChatConfig,
+    GeoChatEngine,
+    ModelUnavailable,
+    read_cpu_fallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +65,9 @@ class ChangeConfig:
     max_regions: int = 8
     max_new_tokens: int = 256
     temperature: float = 0.2
+    #: `vqa_grounding.cpu_fallback.enabled` — one switch for every engine that
+    #: wraps the VQA model. The registry copies it into this block.
+    cpu_fallback_enabled: bool = False
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "ChangeConfig":
@@ -72,6 +81,7 @@ class ChangeConfig:
             max_regions=int(raw.get("max_regions", 8)),
             max_new_tokens=int(raw.get("max_new_tokens", 256)),
             temperature=float(raw.get("temperature", 0.2)),
+            cpu_fallback_enabled=read_cpu_fallback(raw),
         )
 
     def as_vqa_config(self) -> GeoChatConfig:
@@ -82,28 +92,22 @@ class ChangeConfig:
             device=self.device,
             max_new_tokens=self.max_new_tokens,
             temperature=self.temperature,
+            cpu_fallback_enabled=self.cpu_fallback_enabled,
         )
 
 
 def build_change_prompt(question: str | None = None) -> str:
-    """
-    Prompt for the side-by-side temporal preview.
-    """
+    """Vicuna-v1 prompt carrying both frames.
 
-    ask = (
-        "The image contains two satellite views of the same location. "
-        "The LEFT side is T0, the earlier image. "
-        "The RIGHT side is T1, the later image. "
-        "Compare the two views carefully. "
-        "Identify meaningful changes between T0 and T1, "
-        "and describe where those changes occur. "
-        "Ignore the labels and focus on the satellite imagery."
-    )
-
+    Two `<image>` tokens, earlier frame first. A user question is appended after
+    the standard instruction so a change-VQA query ("did the pier get longer?")
+    is answered directly rather than replaced by a generic summary.
+    """
+    ask = CHANGE_INSTRUCTION
     if question and question.strip():
-        ask += f" Then answer this question: {question.strip()}"
+        ask = f"{ask} Then answer: {question.strip()}"
+    return f"{VICUNA_SYSTEM} USER: <image>\n<image>\n{ask} ASSISTANT:"
 
-    return f"{VICUNA_SYSTEM} USER: <image>\n{ask} ASSISTANT:"
 
 # --------------------------------------------------------------------------
 # Difference map — pure Python, so it is testable without torch or a GPU.
@@ -251,47 +255,30 @@ def vision_tower(model: Any) -> Any:
         "somewhere else, add that path to _VISION_TOWER_PATHS."
     )
 
-def create_temporal_preview(
-    t0_path: str | Path,
-    t1_path: str | Path,
-):
+
+def pixel_difference_map(t0_path: str | Path, t1_path: str | Path, grid: int = 24) -> list[list[float]]:
+    """Per-cell RGB difference, normalised to 0-1. CPU fallback only.
+
+    A stand-in for the vision-tower map when `cpu_fallback` is on and the
+    checkpoint cannot load. It measures raw colour change — lighting, season
+    and registration error all count — so it is never the default.
     """
-    Create a side-by-side temporal image:
-    LEFT  = T0 / earlier image
-    RIGHT = T1 / later image
+    import numpy as np
+    from PIL import Image
 
-    This allows the existing single-image LLaVA model
-    to visually compare both timestamps.
-    """
-    from PIL import Image, ImageDraw
-
-    t0 = Image.open(t0_path).convert("RGB")
-    t1 = Image.open(t1_path).convert("RGB")
-
-    # Keep both images at the same size
-    width = min(t0.width, t1.width)
-    height = min(t0.height, t1.height)
-
-    t0 = t0.resize((width, height))
-    t1 = t1.resize((width, height))
-
-    canvas = Image.new(
-        "RGB",
-        (width * 2, height + 40),
-        "white",
+    a, b = (
+        np.asarray(Image.open(p).convert("RGB").resize((grid, grid)), dtype=np.float32) / 255.0
+        for p in (t0_path, t1_path)
     )
+    diff = np.mean(np.abs(a - b), axis=2)
+    low, high = float(diff.min()), float(diff.max())
+    diff = (diff - low) / (high - low) if high > low else np.zeros_like(diff)
+    return [[float(v) for v in row] for row in diff]
 
-    canvas.paste(t0, (0, 40))
-    canvas.paste(t1, (width, 40))
 
-    draw = ImageDraw.Draw(canvas)
-
-    draw.text((10, 10), "T0 - Earlier", fill="black")
-    draw.text((width + 10, 10), "T1 - Later", fill="black")
-
-    return canvas
-    
-    
+#: What a fallback change answer is attributed to. The prose is a template
+#: filled from the pixel diff; no language model reads the frames.
+CPU_FALLBACK_CHANGE_MODEL = "cpu_fallback (rgb pixel diff + templated answer)"
 
 
 # --------------------------------------------------------------------------
@@ -321,41 +308,45 @@ class ChangeDetectorEngine:
 
     # -- difference map ---------------------------------------------------
     def difference_map(self, t0_path: str | Path, t1_path: str | Path) -> list[list[float]]:
-        """Lightweight bi-temporal change detection using image differences."""
+        """Per-patch cosine distance between the two frames' visual features.
 
+        Raises ModelUnavailable when the checkpoint cannot be loaded here, the
+        same way the VQA path does — a missing GPU is an environment fact.
+        """
+        self.load()
+
+        import torch
         from PIL import Image
-        import numpy as np
 
-        GRID_SIZE = 24
+        processor = self.vqa._processor
+        model = self.vqa._model
+        if processor is None:
+            raise ModelUnavailable(
+                "the prompted diff needs the transformers LLaVA path; the geochat "
+                "loader exposes no separate vision tower here"
+            )
 
-        # Load both temporal images
-        t0 = Image.open(t0_path).convert("RGB")
-        t1 = Image.open(t1_path).convert("RGB")
+        images = [Image.open(p).convert("RGB") for p in (t0_path, t1_path)]
+        pixels = processor.image_processor(images=images, return_tensors="pt")["pixel_values"]
+        pixels = pixels.to(model.device, dtype=next(model.parameters()).dtype)
 
-        # Resize both images to the same grid
-        t0 = t0.resize((GRID_SIZE, GRID_SIZE))
-        t1 = t1.resize((GRID_SIZE, GRID_SIZE))
+        tower = vision_tower(model)
+        with torch.inference_mode():
+            features = tower(pixels, output_hidden_states=False)
+            features = getattr(features, "last_hidden_state", features)
 
-        # Convert to normalized RGB arrays
-        a = np.asarray(t0, dtype=np.float32) / 255.0
-        b = np.asarray(t1, dtype=np.float32) / 255.0
+        # Drop the CLS token; what is left is one embedding per image patch.
+        patches = features[:, 1:, :].float()
+        similarity = torch.nn.functional.cosine_similarity(patches[0], patches[1], dim=-1)
+        distance = ((1.0 - similarity) / 2.0).clamp(0.0, 1.0)
 
-        # Calculate RGB difference
-        diff = np.mean(np.abs(a - b), axis=2)
-
-        # Normalize to 0-1
-        min_val = float(diff.min())
-        max_val = float(diff.max())
-
-        if max_val > min_val:
-            diff = (diff - min_val) / (max_val - min_val)
-        else:
-            diff = np.zeros_like(diff)
-
-        return [
-            [float(value) for value in row]
-            for row in diff
-        ]
+        side = int(distance.shape[0] ** 0.5)
+        if side * side != distance.shape[0]:  # pragma: no cover - non-square towers
+            raise ModelUnavailable(
+                f"vision tower returned {distance.shape[0]} patches, which is not a square grid"
+            )
+        grid = distance.reshape(side, side).tolist()
+        return [[float(v) for v in row] for row in grid]
 
     # -- inference --------------------------------------------------------
     def infer(
@@ -373,6 +364,12 @@ class ChangeDetectorEngine:
         ``{answer, evidence, confidence, model_used}``.
         """
         started = time.perf_counter()
+        # Raises ModelUnavailable unless cpu_fallback is on, in which case the
+        # VQA engine comes back degraded instead of loaded.
+        self.load()
+        if self.vqa.degraded:
+            return self._infer_cpu_fallback(t0_path, t1_path, started)
+
         scores = self.difference_map(t0_path, t1_path)
         evidence = mask_evidence(
             scores,
@@ -381,42 +378,15 @@ class ChangeDetectorEngine:
             max_regions=self.config.max_regions,
         )
 
-        frac = changed_fraction(scores, self.config.diff_threshold)
-        pct = round(frac * 100, 1)
-
-        if getattr(self.vqa, "_fallback_mode", False) or self.vqa._model is None:
-            num_regions = len(evidence)
-            if pct < 1.0:
-                answer = f"Minimal change detected between earlier (T0) and later (T1) captures ({pct}% surface variation). Surface reflectance and canopy structure remain largely stable across the footprint."
-            elif pct < 15.0:
-                answer = f"Localised changes detected across {pct}% of the area ({num_regions} distinct change cluster{'s' if num_regions != 1 else ''}). Surface alterations indicate minor vegetation clearance, growth, or seasonal ground variation."
-            else:
-                answer = f"Significant structural changes detected across {pct}% of the captured footprint ({num_regions} prominent change zone{'s' if num_regions != 1 else ''}). Substantial shift in surface reflectance observed between the earlier and later captures."
-
-            confidence = round(0.86 + min(frac * 0.1, 0.08), 2)
-            return {
-                "answer": answer,
-                "evidence": evidence,
-                "confidence": confidence,
-                "model_used": f"{self.model_used} (CPU fallback)",
-                "changed_fraction": frac,
-                "grid": f"{len(scores)}x{len(scores[0]) if scores else 0}",
-                "tokens": len(answer.split()),
-                "duration_ms": int((time.perf_counter() - started) * 1000),
-            }
-
         import torch
+        from PIL import Image
+
+        images = [Image.open(p).convert("RGB") for p in (t0_path, t1_path)]
         prompt = build_change_prompt(question)
         processor = self.vqa._processor
         model = self.vqa._model
 
-        temporal_image = create_temporal_preview(t0_path, t1_path)
-        batch = processor(
-            images=temporal_image,
-            text=prompt,
-            return_tensors="pt",
-        ).to(model.device)
-
+        batch = processor(images=images, text=prompt, return_tensors="pt").to(model.device)
         prompt_len = batch["input_ids"].shape[1]
         temp = self.config.temperature if temperature is None else temperature
 
@@ -442,8 +412,52 @@ class ChangeDetectorEngine:
             "evidence": evidence,
             "confidence": confidence,
             "model_used": self.model_used,
-            "changed_fraction": frac,
+            "changed_fraction": changed_fraction(scores, self.config.diff_threshold),
             "grid": f"{len(scores)}x{len(scores[0]) if scores else 0}",
             "tokens": int(generated.shape[0]),
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    def _infer_cpu_fallback(
+        self, t0_path: str | Path, t1_path: str | Path, started: float
+    ) -> dict[str, Any]:
+        """Opt-in demo answer from a pixel diff. Marked degraded, no confidence."""
+        scores = pixel_difference_map(t0_path, t1_path)
+        evidence = mask_evidence(
+            scores,
+            threshold=self.config.diff_threshold,
+            min_region_area=self.config.min_region_area,
+            max_regions=self.config.max_regions,
+        )
+        frac = changed_fraction(scores, self.config.diff_threshold)
+        pct = round(frac * 100, 1)
+        n = len(evidence)
+        if pct < 1.0:
+            answer = (
+                f"Minimal change detected between earlier (T0) and later (T1) captures "
+                f"({pct}% of cells changed in raw colour)."
+            )
+        elif pct < 15.0:
+            answer = (
+                f"Localised colour change across {pct}% of the area "
+                f"({n} changed region{'s' if n != 1 else ''})."
+            )
+        else:
+            answer = (
+                f"Widespread colour change across {pct}% of the scene "
+                f"({n} changed region{'s' if n != 1 else ''})."
+            )
+        answer += " CPU fallback: raw pixel difference only, not the fine-tuned model."
+
+        return {
+            "answer": answer,
+            "evidence": evidence,
+            "confidence": None,
+            "model_used": CPU_FALLBACK_CHANGE_MODEL,
+            "degraded": True,
+            "degraded_reason": self.vqa.fallback_reason,
+            "changed_fraction": frac,
+            "grid": f"{len(scores)}x{len(scores[0]) if scores else 0}",
+            "tokens": len(answer.split()),
             "duration_ms": int((time.perf_counter() - started) * 1000),
         }

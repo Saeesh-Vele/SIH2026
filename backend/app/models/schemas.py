@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _utcnow() -> datetime:
@@ -106,6 +106,20 @@ class QueryHistoryDoc(QueryHistoryBase):
     timestamp: datetime = Field(default_factory=_utcnow)
 
 
+def _check_degraded_confidence(model: Any) -> Any:
+    """`confidence` is None exactly when `degraded` is true.
+
+    A CPU-fallback answer has no measured confidence; a real-model answer (or a
+    run with no answer, reported as 0.0) always has a number.
+    """
+    if model.degraded != (model.confidence is None):
+        raise ValueError(
+            f"confidence={model.confidence!r} with degraded={model.degraded}: "
+            "confidence must be None exactly when degraded is true"
+        )
+    return model
+
+
 # --------------------------------------------------------------------------
 # execution_traces
 # --------------------------------------------------------------------------
@@ -134,8 +148,14 @@ class ExecutionTraceCreate(BaseModel):
     error: str | None = None
     models_used: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
-    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    #: None only for a degraded run — see `degraded`.
+    confidence: float | None = Field(0.0, ge=0.0, le=1.0)
+    #: The answer came from the opt-in CPU fallback, not the configured model.
+    degraded: bool = False
+    degraded_reason: str | None = None
     steps: list[TraceStep] = Field(default_factory=list)
+
+    _degraded_confidence = model_validator(mode="after")(_check_degraded_confidence)
 
 
 class ExecutionTraceDoc(ExecutionTraceCreate):
@@ -189,7 +209,13 @@ class QueryResponse(BaseModel):
     intent: Intent | None = None
     task_selected: TaskType
     answer: str
-    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    #: None only for a degraded run — see `degraded`.
+    confidence: float | None = Field(0.0, ge=0.0, le=1.0)
+    #: The answer came from the opt-in CPU fallback (model_config.yaml
+    #: `vqa_grounding.cpu_fallback`), not the configured model.
+    degraded: bool = False
+    #: Why the configured model did not run, when `degraded`.
+    degraded_reason: str | None = None
     #: Geometry the canvas draws, normalised to 0-1 of the scene extent.
     overlays: list[dict[str, Any]] = Field(default_factory=list)
     models_used: list[str] = Field(default_factory=list)
@@ -197,6 +223,8 @@ class QueryResponse(BaseModel):
     steps: list[TraceStep] = Field(default_factory=list)
     #: Set when status is not "ok" — why the run produced no answer.
     error: str | None = None
+
+    _degraded_confidence = model_validator(mode="after")(_check_degraded_confidence)
 
 
 class HealthResponse(BaseModel):
