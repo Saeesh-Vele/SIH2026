@@ -63,9 +63,18 @@ export function ResultPanel({
   if (!result) {
     return (
       <p className="text-[13px] leading-relaxed text-muted-foreground">
-        {hasScene
-          ? "Your answer will appear here, with how confident the model was and every step it took."
-          : "Choose imagery and ask a question; the answer appears here."}
+        {hasScene ? (
+          <>
+            Your answer will appear here, with how confident the model was and its{" "}
+            <Term term="trace">
+              A record of every step SatQuery took for this answer: what it decided you were
+              asking, which model it ran, and how long each stage took. Saved with every run.
+            </Term>
+            .
+          </>
+        ) : (
+          "Choose imagery and ask a question; the answer appears here."
+        )}
       </p>
     );
   }
@@ -95,7 +104,7 @@ function ErrorState({ error }: { error: Explained }) {
 
 function DegradedBadge({ reason }: { reason: string | null }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+    <div data-tour="degraded" className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <Badge
         variant="outline"
         className="gap-1 rounded-sm border-caution bg-caution/15 px-1.5 font-mono text-[11px] text-caution"

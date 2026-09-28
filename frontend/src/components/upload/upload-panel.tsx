@@ -3,7 +3,8 @@
 import { useRef, useState } from "react";
 import { FileWarning, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { MODE_HINTS, MODE_ROLES } from "@/lib/tasks";
+import { Term } from "@/components/console/info-popover";
+import { MODE_ROLES } from "@/lib/tasks";
 import {
   BENCHMARK_EXTENSIONS,
   acceptAttribute,
@@ -87,7 +88,9 @@ export function UploadPanel({
 
   return (
     <div className="space-y-4">
-      <p className="text-[13px] leading-relaxed text-text-dim">{MODE_HINTS[mode]}</p>
+      <p className="text-[13px] leading-relaxed text-text-dim">
+        <ModeHint mode={mode} />
+      </p>
 
       <div className={cn("grid gap-3", slots.length > 1 && "sm:grid-cols-2")}>
         {slots.map((slot) => (
@@ -281,3 +284,35 @@ function Dropzone({
     </div>
   );
 }
+
+/** The layout's one-line hint, with the two unfamiliar terms explained in place. */
+function ModeHint({ mode }: { mode: UploadMode }) {
+  if (mode === "bi_temporal") {
+    return (
+      <>
+        A{" "}
+        <Term term="bi-temporal">
+          Two images of the same place taken at different times. Comparing them shows what
+          changed in between.
+        </Term>{" "}
+        pair: two images of the same area on different dates, earliest first. They must cover
+        the same ground, or every difference looks like change.
+      </>
+    );
+  }
+  if (mode === "cross_modal") {
+    return (
+      <>
+        An ordinary (optical) image and a{" "}
+        <Term term="SAR">
+          Synthetic aperture radar. The satellite sends out radar pulses and records the echo, so
+          it sees through cloud and works at night. It shows surface texture and moisture rather
+          than colour.
+        </Term>{" "}
+        image of the same area.
+      </>
+    );
+  }
+  return <>One satellite image. Ask what it shows.</>;
+}
+

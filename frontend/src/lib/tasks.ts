@@ -68,15 +68,6 @@ export const MODE_LABELS: Record<UploadMode, string> = {
   cross_modal: "Optical + SAR",
 };
 
-/** One line under the upload slots, in plain language. */
-export const MODE_HINTS: Record<UploadMode, string> = {
-  single: "One satellite image. Ask what it shows.",
-  bi_temporal:
-    "Two images of the same area on different dates, earliest first. They must cover the same ground, or every difference looks like change.",
-  cross_modal:
-    "An ordinary (optical) image and a radar (SAR) image of the same area. SAR is radar: it sees through cloud and works at night, but shows texture rather than colour.",
-};
-
 /** Roles each mode expects, in slot order. Mirrors MODE_ROLES in the backend. */
 export const MODE_ROLES: Record<
   UploadMode,

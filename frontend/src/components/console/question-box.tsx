@@ -84,6 +84,7 @@ export function QuestionBox({
       <div className="flex items-center gap-3">
         <Button
           type="button"
+          data-tour="run"
           onClick={run}
           disabled={!canRun}
           className={cn(

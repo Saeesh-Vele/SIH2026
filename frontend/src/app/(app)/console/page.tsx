@@ -3,6 +3,13 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { RequireAuth } from "@/components/auth/require-auth";
+import { useAuth } from "@/components/auth/auth-provider";
+import {
+  TourHelpButton,
+  TourWelcome,
+  useConsoleTour,
+  type TourActions,
+} from "@/components/tour/console-tour";
 import { TopBar } from "@/components/top-bar";
 import { SceneCanvas, type Pane } from "@/components/canvas/scene-canvas";
 import { UploadPanel } from "@/components/upload/upload-panel";
@@ -13,23 +20,18 @@ import { QuestionBox } from "@/components/console/question-box";
 import { PipelineProgress } from "@/components/console/pipeline-progress";
 import { ResultPanel } from "@/components/console/result-panel";
 import { TracePanel } from "@/components/console/trace-panel";
-import {
-  fetchPreviewUrl,
-  getStoredResult,
-  getUpload,
-  streamQuery,
-  uploadScene,
-} from "@/lib/api";
+import { fetchPreviewUrl, getStoredResult, getUpload, streamQuery, uploadScene } from "@/lib/api";
 import { explainError, type Explained } from "@/lib/errors";
-import { loadSamples, needsBenchmarkMode, stageSample, type Sample } from "@/lib/samples";
+import {
+  LANDING_SAMPLE_ID,
+  loadSamples,
+  needsBenchmarkMode,
+  stageSample,
+  type Sample,
+} from "@/lib/samples";
+import { SUGGESTED_QUESTIONS } from "@/lib/suggestions";
 import { MODE_LABELS, MODE_ROLES, TASK_OPTIONS, type TaskChoice } from "@/lib/tasks";
-import type {
-  QueryResult,
-  StagedFile,
-  TraceStep,
-  UploadMode,
-  UploadResult,
-} from "@/lib/types";
+import type { QueryResult, StagedFile, TraceStep, UploadMode, UploadResult } from "@/lib/types";
 
 /** Formats a browser decodes itself; anything else is rendered by the server. */
 const BROWSER_DECODES = /\.(png|jpe?g|webp|gif)$/i;
@@ -287,12 +289,47 @@ function Console() {
   const step1: StepState = bound ? "done" : "current";
   const step2: StepState = !bound ? "upcoming" : result || busy ? "done" : "current";
   const step3: StepState = busy || result || runError ? "current" : "upcoming";
-  const activeMode = task === "auto" ? mode : (TASK_OPTIONS.find((o) => o.id === task)?.mode ?? mode);
+  const activeMode =
+    task === "auto" ? mode : (TASK_OPTIONS.find((o) => o.id === task)?.mode ?? mode);
   const totalMs = steps.reduce((sum, s) => sum + (s.duration_ms ?? 0), 0);
+
+  // The tour reads the console through this, fresh at every step.
+  const { user } = useAuth();
+  const tourActions = useRef<TourActions>({
+    isBound: () => false,
+    isBusy: () => false,
+    hasResult: () => false,
+    loadSample: async () => {},
+    run: () => {},
+  });
+  useEffect(() => {
+    tourActions.current = {
+      isBound: () => bound,
+      isBusy: () => busy,
+      hasResult: () => result !== null || runError !== null,
+      loadSample: async () => {
+        const sample = samples?.find((s) => s.id === LANDING_SAMPLE_ID && s.status === "ready");
+        if (sample) await pickSample(sample);
+      },
+      run: () => {
+        const text = question.trim() || SUGGESTED_QUESTIONS[boundMode ?? activeMode][0];
+        setQuestion(text);
+        void runQuery(text);
+      },
+    };
+  });
+  const tour = useConsoleTour(user?.uid ?? null, tourActions);
 
   return (
     <div className="flex min-h-dvh flex-col bg-void lg:h-dvh lg:overflow-hidden">
-      <TopBar busy={busy} />
+      <TopBar busy={busy}>
+        <TourHelpButton onClick={() => void tour.start(0)} />
+      </TopBar>
+      <TourWelcome
+        open={tour.welcomeOpen}
+        onStart={() => void tour.start(0)}
+        onSkip={tour.skip}
+      />
 
       <main className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(380px,460px)]">
         <SceneCanvas
@@ -304,7 +341,10 @@ function Console() {
 
         {/* The steps scroll as one column on desktop. On a phone the wrapper
             dissolves so the imagery can sit between step 1 and step 2. */}
-        <div className="contents lg:flex lg:min-h-0 lg:flex-col lg:gap-3 lg:overflow-y-auto lg:pr-1">
+        <div
+          data-tour-scroll
+          className="contents lg:flex lg:min-h-0 lg:flex-col lg:gap-3 lg:overflow-y-auto lg:pr-1"
+        >
           <Step
             n={1}
             title="Choose imagery"
@@ -377,7 +417,13 @@ function Console() {
             </div>
           </Step>
 
-          <Step n={2} title="Ask" state={step2} className="order-3 lg:order-none" data-tour="question">
+          <Step
+            n={2}
+            title="Ask"
+            state={step2}
+            className="order-3 lg:order-none"
+            data-tour="question"
+          >
             <QuestionBox
               value={question}
               onChange={setQuestion}
@@ -401,14 +447,16 @@ function Console() {
                   <PipelineProgress steps={steps} running={busy} />
                 </div>
               ) : null}
-              <ResultPanel
-                result={result}
-                panes={panes}
-                busy={busy}
-                hasScene={bound}
-                error={runError}
-                answerStored={answerStored}
-              />
+              <div data-tour="result">
+                <ResultPanel
+                  result={result}
+                  panes={panes}
+                  busy={busy}
+                  hasScene={bound}
+                  error={runError}
+                  answerStored={answerStored}
+                />
+              </div>
               {steps.length > 0 || busy ? (
                 <div data-tour="trace">
                   <TracePanel
