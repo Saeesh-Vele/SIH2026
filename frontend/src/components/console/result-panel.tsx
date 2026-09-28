@@ -1,14 +1,16 @@
 "use client";
 
-import { AlertTriangle, Download } from "lucide-react";
+import { AlertTriangle, Download, LogIn } from "lucide-react";
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Frame, FieldRow } from "@/components/frame";
-import { SyntheticRaster } from "@/components/canvas/synthetic-raster";
+import { FieldRow } from "@/components/frame";
+import { InfoPopover, Term } from "@/components/console/info-popover";
 import type { Pane } from "@/components/canvas/scene-canvas";
-import { INTENT_CODES, INTENT_LABELS } from "@/lib/suggestions";
+import type { Explained } from "@/lib/errors";
+import { signInHref } from "@/lib/safe-next";
+import { INTENT_LABELS } from "@/lib/suggestions";
 import { TASK_LABELS } from "@/lib/tasks";
 import { cn } from "@/lib/utils";
 import type { MaskOverlay, QueryResult } from "@/lib/types";
@@ -20,11 +22,23 @@ import type { MaskOverlay, QueryResult } from "@/lib/types";
  */
 const SUMMARY_METRIC = "sensor summary";
 
-/** Headline shown above the explanation when a run ends without an answer. */
-const STATUS_HEADLINE: Record<Exclude<QueryResult["status"], "ok">, string> = {
-  rejected: "The bound scene does not match this question",
-  unavailable: "That model is not available here",
-  failed: "The run did not finish",
+/** What happened and what to do, for each way a run can end without an answer. */
+const STATUS_COPY: Record<
+  Exclude<QueryResult["status"], "ok">,
+  { title: string; next: string }
+> = {
+  rejected: {
+    title: "The imagery can’t answer this question",
+    next: "Check the reason below, then change the imagery in step 1 or rephrase the question.",
+  },
+  unavailable: {
+    title: "The model for this task isn’t running on this server",
+    next: "The server couldn’t load the model, most often because no GPU is available to it at the moment. Try again later; the exact reason is below.",
+  },
+  failed: {
+    title: "The run stopped before it finished",
+    next: "Run it again. If it fails the same way, the trace below shows which step stopped it.",
+  },
 };
 
 export function ResultPanel({
@@ -32,72 +46,84 @@ export function ResultPanel({
   panes,
   busy,
   hasScene,
-  transportError,
+  error,
+  answerStored = true,
 }: {
   result: QueryResult | null;
   /** The bound scenes, so fusion can show what it combined. */
   panes: Pane[];
   busy: boolean;
   hasScene: boolean;
-  transportError: string | null;
+  error: Explained | null;
+  /** False when reopening a run stored before answers were kept. */
+  answerStored?: boolean;
 }) {
-  return (
-    <Frame
-      label="RESULT"
-      aside={result ? result.queryId.slice(0, 8) : undefined}
-      className="min-h-0 flex-1"
-      bodyClassName="min-h-0"
-    >
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-4 p-3">
-          {transportError ? <TransportError message={transportError} /> : null}
-          {busy && !transportError ? <RunningState /> : null}
-          {!busy && !result && !transportError ? <EmptyState hasScene={hasScene} /> : null}
-          {!busy && result && !transportError ? (
-            <Answer result={result} panes={panes} />
-          ) : null}
-        </div>
-      </ScrollArea>
-    </Frame>
-  );
+  if (error) return <ErrorState error={error} />;
+  if (busy) return null;
+  if (!result) {
+    return (
+      <p className="text-[13px] leading-relaxed text-muted-foreground">
+        {hasScene
+          ? "Your answer will appear here, with how confident the model was and every step it took."
+          : "Choose imagery and ask a question; the answer appears here."}
+      </p>
+    );
+  }
+  return <Answer result={result} panes={panes} answerStored={answerStored} />;
 }
 
-function TransportError({ message }: { message: string }) {
+function ErrorState({ error }: { error: Explained }) {
   return (
-    <div className="space-y-2 border border-alarm bg-raised p-3">
-      <p className="flex items-center gap-2 text-[13px] text-alarm">
-        <AlertTriangle className="size-3.5 shrink-0" />
-        Could not reach the controller
+    <div role="alert" className="space-y-2 rounded-sm border border-alarm/70 bg-raised p-3">
+      <p className="flex items-start gap-2 text-[14px] font-medium text-alarm">
+        <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+        {error.title}
       </p>
-      <p className="font-mono text-[11px] leading-relaxed text-muted-foreground">{message}</p>
-      <p className="font-mono text-[11px] leading-relaxed text-muted-foreground">
-        Start the backend with{" "}
-        <code className="text-text-dim">uvicorn app.main:app --reload</code> from{" "}
-        <code className="text-text-dim">backend/</code>.
-      </p>
+      <p className="text-[13px] leading-relaxed text-text-dim">{error.detail}</p>
+      {error.signIn ? (
+        <Link
+          href={signInHref("/console")}
+          className="inline-flex items-center gap-1.5 rounded-sm text-[13px] text-signal underline-offset-4 hover:underline"
+        >
+          <LogIn className="size-3.5" aria-hidden />
+          Sign in again
+        </Link>
+      ) : null}
     </div>
   );
 }
 
-function RunningState() {
+function DegradedBadge({ reason }: { reason: string | null }) {
   return (
-    <p className="font-mono text-[11px] text-caution">
-      Controller running — steps are landing in the trace below.
-    </p>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <Badge
+        variant="outline"
+        className="gap-1 rounded-sm border-caution bg-caution/15 px-1.5 font-mono text-[11px] text-caution"
+      >
+        <AlertTriangle className="size-3" aria-hidden />
+        Degraded mode — CPU fallback
+      </Badge>
+      <InfoPopover label="What does Degraded mode mean?">
+        <p>
+          The main model couldn&rsquo;t run on this server, so a smaller CPU model answered
+          instead. Treat this answer as a rough guide: it is not from the fine-tuned model, and
+          its confidence wasn&rsquo;t measured.
+        </p>
+        {reason ? <p className="mt-2 text-[12px] text-muted-foreground">Reason: {reason}</p> : null}
+      </InfoPopover>
+    </div>
   );
 }
 
-function EmptyState({ hasScene }: { hasScene: boolean }) {
-  return (
-    <p className="max-w-[42ch] text-[13px] leading-relaxed text-muted-foreground">
-      {hasScene
-        ? "Ask a question above. The controller classifies it, checks it against the bound scene, and runs the model that fits — every step shows up in the trace below."
-        : "Bind a scene on the left to start asking questions."}
-    </p>
-  );
-}
-
-function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
+function Answer({
+  result,
+  panes,
+  answerStored,
+}: {
+  result: QueryResult;
+  panes: Pane[];
+  answerStored: boolean;
+}) {
   const failed = result.status !== "ok" ? result.status : null;
   const ok = failed === null;
   // Null only on a degraded (CPU-fallback) run: there is no measured value to
@@ -115,63 +141,43 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
           : "alarm";
 
   return (
-    <>
-      <div className="flex flex-wrap items-center gap-2">
-        {result.degraded ? (
-          <Badge
-            variant="outline"
-            title={result.degradedReason ?? undefined}
-            className="gap-1 rounded-sm border-caution bg-caution/15 px-1.5 font-mono text-[10px] text-caution"
-          >
-            <AlertTriangle className="size-3" />
-            Degraded mode — CPU fallback
-          </Badge>
-        ) : null}
-        {result.intent ? (
-          <Badge
-            variant="outline"
-            className="gap-1.5 rounded-sm border-signal-deep bg-signal-deep/40 px-1.5 font-mono text-[10px] text-signal"
-          >
-            {INTENT_CODES[result.intent]}
-            <span className="text-signal/60">{INTENT_LABELS[result.intent]}</span>
-          </Badge>
-        ) : null}
-        <Badge
-          variant="outline"
-          className="rounded-sm border-rule bg-raised px-1.5 font-mono text-[10px] font-normal text-muted-foreground"
-        >
-          {TASK_LABELS[result.taskSelected]}
-        </Badge>
-        {result.modelsUsed.map((model) => (
-          <Badge
-            key={model}
-            variant="outline"
-            className="rounded-sm border-rule bg-raised px-1.5 font-mono text-[10px] font-normal text-muted-foreground"
-          >
-            {model}
-          </Badge>
-        ))}
-      </div>
-
+    <div className="space-y-5">
+      {/* 1. The answer — or, when there is none, what happened and what to do. */}
       {ok ? (
-        <p className="max-w-[62ch] text-[13.5px] leading-[1.65] text-foreground">
-          {result.answer}
-        </p>
+        <div className="space-y-2.5">
+          {result.degraded ? <DegradedBadge reason={result.degradedReason} /> : null}
+          {answerStored ? (
+            <p className="text-[15.5px] leading-[1.65] text-foreground">{result.answer}</p>
+          ) : (
+            <p className="text-[13px] leading-relaxed text-muted-foreground">
+              This run was saved before answers were stored, so only its trace is available.
+            </p>
+          )}
+        </div>
       ) : (
-        <div className="space-y-2 border border-caution bg-raised p-3">
-          <p className="flex items-start gap-2 text-[13px] leading-snug text-caution">
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-            {failed ? STATUS_HEADLINE[failed] : null}
+        <div role="alert" className="space-y-2 rounded-sm border border-caution/70 bg-raised p-3">
+          <p className="flex items-start gap-2 text-[14px] font-medium leading-snug text-caution">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            {STATUS_COPY[failed].title}
           </p>
-          <p className="max-w-[58ch] font-mono text-[11px] leading-relaxed text-text-dim">
-            {result.error ?? result.answer}
-          </p>
+          <p className="text-[13px] leading-relaxed text-text">{STATUS_COPY[failed].next}</p>
+          {result.error ?? result.answer ? (
+            <p className="font-mono text-[11.5px] leading-relaxed text-muted-foreground">
+              {result.error ?? result.answer}
+            </p>
+          ) : null}
         </div>
       )}
 
-      {ok && confidence === null ? (
-        <div className="flex items-baseline justify-between font-mono text-[10px]">
-          <span className="text-muted-foreground">confidence</span>
+      {/* 2. How sure it was. */}
+      {ok && answerStored && confidence === null ? (
+        <div className="flex flex-wrap items-baseline justify-between gap-2 text-[12.5px]">
+          <span className="text-muted-foreground">
+            <Term term="Confidence">
+              How sure the model was of its own words: the average probability it gave each token
+              of the answer. Not a measure of whether the answer is correct.
+            </Term>
+          </span>
           <span className="text-caution">
             not measured — CPU fallback
             {result.degradedReason ? ` (${result.degradedReason})` : ""}
@@ -179,15 +185,18 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
         </div>
       ) : null}
 
-      {ok && confidence !== null ? (
+      {ok && answerStored && confidence !== null ? (
         <div className="space-y-1.5">
-          <div className="flex items-baseline justify-between font-mono text-[10px]">
+          <div className="flex items-baseline justify-between text-[12.5px]">
             <span className="text-muted-foreground">
-              confidence
-              <span className="ml-1.5 text-muted-foreground">mean token probability</span>
+              <Term term="Confidence">
+                How sure the model was of its own words: the average probability it gave each
+                token of the answer. Not a measure of whether the answer is correct.
+              </Term>
             </span>
             <span
               className={cn(
+                "font-mono",
                 tone === "signal" && "text-signal",
                 tone === "caution" && "text-caution",
                 tone === "alarm" && "text-alarm",
@@ -198,6 +207,7 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
           </div>
           <Progress
             value={Math.round(confidence * 100)}
+            aria-label={`Confidence ${confidence.toFixed(2)}`}
             className="h-1 rounded-none bg-raised"
             indicatorClassName={cn(
               "rounded-none",
@@ -209,6 +219,7 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
         </div>
       ) : null}
 
+      {/* 3. The evidence behind it. */}
       {rowMetrics.length > 0 ? (
         <div className="space-y-1 border-t border-rule pt-3">
           {rowMetrics.map((metric) => (
@@ -219,53 +230,80 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
 
       {ok ? <TaskReport result={result} panes={panes} summary={summary} /> : null}
 
-      {ok ? (
-        <div className="pt-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              const reportData = {
-                report_title: "SatQuery AI Remote-Sensing Analysis Report",
-                generated_at: new Date().toISOString(),
-                query_id: result.queryId,
-                trace_id: result.traceId,
-                status: result.status,
-                task_selected: result.taskSelected,
-                intent: result.intent,
-                answer: result.answer,
-                // null on a degraded run, alongside the flag that explains it.
-                confidence_score: result.confidence,
-                degraded: result.degraded,
-                degraded_reason: result.degradedReason,
-                models_used: result.modelsUsed,
-                bound_scenes: panes.map((p) => ({
-                  scene_id: p.meta.sceneId,
-                  role: p.meta.role,
-                  size_bytes: p.meta.sizeBytes,
-                  content_type: p.meta.contentType,
-                })),
-                visual_evidence: result.overlays,
-                metrics: result.metrics,
-              };
-              const blob = new Blob([JSON.stringify(reportData, null, 2)], {
-                type: "application/json",
-              });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = `satquery-report-${result.queryId.slice(0, 8)}.json`;
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-            className="h-7 w-full gap-2 rounded-sm border-rule bg-raised font-mono text-[11px] text-foreground hover:border-signal/50 hover:bg-signal/10 hover:text-signal"
-          >
-            <Download className="size-3.5" />
-            Download Analysis Report (.json)
-          </Button>
-        </div>
-      ) : null}
-    </>
+      <div className="flex flex-wrap gap-1.5 border-t border-rule pt-3">
+        {result.intent ? <Chip>{INTENT_LABELS[result.intent]}</Chip> : null}
+        <Chip>{TASK_LABELS[result.taskSelected]}</Chip>
+        {/* A model is named only when it produced the answer shown. */}
+        {(ok ? result.modelsUsed : []).map((model) => (
+          <Chip key={model} mono>
+            {model}
+          </Chip>
+        ))}
+      </div>
+
+      {ok && answerStored ? <DownloadReport result={result} panes={panes} /> : null}
+    </div>
+  );
+}
+
+function Chip({ children, mono = false }: { children: React.ReactNode; mono?: boolean }) {
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "max-w-full truncate rounded-sm border-rule bg-raised px-1.5 text-[11px] font-normal text-text-dim",
+        mono && "font-mono",
+      )}
+    >
+      {children}
+    </Badge>
+  );
+}
+
+function DownloadReport({ result, panes }: { result: QueryResult; panes: Pane[] }) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => {
+        const reportData = {
+          report_title: "SatQuery AI Remote-Sensing Analysis Report",
+          generated_at: new Date().toISOString(),
+          query_id: result.queryId,
+          trace_id: result.traceId,
+          status: result.status,
+          task_selected: result.taskSelected,
+          intent: result.intent,
+          answer: result.answer,
+          // null on a degraded run, alongside the flag that explains it.
+          confidence_score: result.confidence,
+          degraded: result.degraded,
+          degraded_reason: result.degradedReason,
+          models_used: result.modelsUsed,
+          bound_scenes: panes.map((p) => ({
+            scene_id: p.meta.sceneId,
+            role: p.meta.role,
+            size_bytes: p.meta.sizeBytes,
+            content_type: p.meta.contentType,
+          })),
+          visual_evidence: result.overlays,
+          metrics: result.metrics,
+        };
+        const blob = new Blob([JSON.stringify(reportData, null, 2)], {
+          type: "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `satquery-report-${result.queryId.slice(0, 8)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }}
+      className="h-8 w-full gap-2 rounded-sm border-rule-strong bg-raised text-[12.5px] text-foreground hover:border-signal hover:bg-raised hover:text-signal"
+    >
+      <Download className="size-3.5" aria-hidden />
+      Download report (.json)
+    </Button>
   );
 }
 
@@ -295,8 +333,8 @@ function TaskReport({
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1.5 border-t border-rule pt-3">
-      <p className="font-mono text-[10px] text-muted-foreground">{title}</p>
+    <div className="space-y-2 border-t border-rule pt-3">
+      <p className="text-[12.5px] text-text-dim">{title}</p>
       {children}
     </div>
   );
@@ -306,13 +344,13 @@ function OverlayList({ result }: { result: QueryResult }) {
   if (result.overlays.length === 0) return null;
   return (
     <Section
-      title={`${result.overlays.length} overlay${result.overlays.length > 1 ? "s" : ""} drawn on the scene`}
+      title={`${result.overlays.length} region${result.overlays.length > 1 ? "s" : ""} marked on the image`}
     >
       <ul className="divide-y divide-rule border border-rule">
         {result.overlays.map((overlay) => (
           <li
             key={overlay.id}
-            className="flex items-baseline justify-between gap-3 px-2 py-1 font-mono text-[11px]"
+            className="flex items-baseline justify-between gap-3 px-2 py-1 font-mono text-[11.5px]"
           >
             <span className="truncate text-text-dim">{overlay.label}</span>
             <span className="shrink-0 text-muted-foreground">
@@ -329,11 +367,10 @@ function OverlayList({ result }: { result: QueryResult }) {
 function ChangeReport({ masks }: { masks: MaskOverlay[] }) {
   if (masks.length === 0) {
     return (
-      <Section title="change mask">
-        <p className="max-w-[52ch] text-[12.5px] leading-relaxed text-muted-foreground">
-          No region passed the difference threshold — the model read the two captures as
-          unchanged. Lower <code className="text-text-dim">diff_threshold</code> in
-          model_config.yaml to report weaker differences.
+      <Section title="Changed areas">
+        <p className="text-[13px] leading-relaxed text-muted-foreground">
+          No area differed enough between the two dates to be marked, so the model read them as
+          unchanged.
         </p>
       </Section>
     );
@@ -343,13 +380,13 @@ function ChangeReport({ masks }: { masks: MaskOverlay[] }) {
 
   return (
     <Section
-      title={`${masks.length} changed region${masks.length > 1 ? "s" : ""} masked on the scene${
-        covered > 0 ? ` · ${(covered * 100).toFixed(1)}% of the frame` : ""
+      title={`${masks.length} changed area${masks.length > 1 ? "s" : ""} marked on the image${
+        covered > 0 ? `, ${(covered * 100).toFixed(1)}% of the frame` : ""
       }`}
     >
       <ul className="divide-y divide-rule border border-rule">
         {masks.map((mask) => (
-          <li key={mask.id} className="flex items-baseline gap-3 px-2 py-1 font-mono text-[11px]">
+          <li key={mask.id} className="flex items-baseline gap-3 px-2 py-1 font-mono text-[11.5px]">
             <span className="shrink-0 text-muted-foreground">{mask.id}</span>
             <span className="truncate text-text-dim">{mask.label}</span>
             <span className="h-px min-w-3 flex-1 translate-y-[-3px] bg-rule" aria-hidden />
@@ -358,13 +395,13 @@ function ChangeReport({ masks }: { masks: MaskOverlay[] }) {
                 {(mask.area * 100).toFixed(1)}%
               </span>
             ) : null}
-            <span className="shrink-0 text-caution">{mask.confidence.toFixed(2)}</span>
+            <span className="shrink-0 text-text-dim">{mask.confidence.toFixed(2)}</span>
           </li>
         ))}
       </ul>
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
-        Regions come from the vision tower&rsquo;s patch grid, so each mask is the bounding
-        rectangle of a changed cluster rather than a traced outline.
+      <p className="text-[12px] leading-relaxed text-muted-foreground">
+        Each area is the rectangle around a cluster of image patches that changed, not a traced
+        outline.
       </p>
     </Section>
   );
@@ -376,57 +413,49 @@ function FusionReport({ panes, summary }: { panes: Pane[]; summary: string | nul
   const sar = panes.find((pane) => pane.meta.role === "sar");
 
   return (
-    <Section title="fused inputs">
+    <Section title="What was combined">
       {optical && sar ? (
         <div className="grid grid-cols-2 gap-px border border-rule bg-rule">
           {(
             [
-              ["OPTICAL", optical],
+              ["Optical", optical],
               ["SAR", sar],
             ] as const
           ).map(([label, pane]) => (
-            <figure key={label} className="relative bg-void">
+            <figure key={label} className="bg-void">
               <div className="relative aspect-square w-full overflow-hidden">
-                {pane.previewUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element -- a blob: URL from the user's own file
+                {pane.preview.url ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- a blob: URL of the user's own file
                   <img
-                    src={pane.previewUrl}
+                    src={pane.preview.url}
                     alt={`${label} input: ${pane.meta.sceneId}`}
-                    className="absolute inset-0 size-full object-cover"
+                    className="absolute inset-0 size-full object-cover [image-rendering:pixelated]"
                   />
                 ) : (
-                  <SyntheticRaster
-                    seed={pane.seed}
-                    tint={pane.tint}
-                    className="absolute inset-0 size-full"
-                  />
+                  <span className="texture-graticule absolute inset-0 grid place-items-center px-2 text-center text-[11px] text-muted-foreground">
+                    No preview
+                  </span>
                 )}
-                <div className="texture-scanline absolute inset-0" />
-                <span className="absolute left-1.5 top-1.5 bg-void/85 px-1 py-0.5 font-mono text-[9px] tracking-[0.14em] text-signal">
+                <span className="absolute left-1.5 top-1.5 rounded-sm bg-void/85 px-1 py-0.5 text-[10.5px] text-signal">
                   {label}
                 </span>
               </div>
-              <figcaption className="truncate px-1.5 py-1 font-mono text-[10px] text-muted-foreground">
+              <figcaption className="truncate px-1.5 py-1 font-mono text-[10.5px] text-muted-foreground">
                 {pane.meta.sceneId}
               </figcaption>
             </figure>
           ))}
         </div>
       ) : (
-        <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-          The bound pair is no longer on screen, so the inputs cannot be shown alongside the
-          answer.
+        <p className="text-[13px] leading-relaxed text-muted-foreground">
+          The two images are no longer on screen, so they can&rsquo;t be shown beside the answer.
         </p>
       )}
 
       {summary ? (
-        <div className="border border-rule bg-raised p-2">
-          <p className="font-mono text-[9px] tracking-[0.14em] text-muted-foreground">
-            WHAT THE ENCODER TOLD THE MODEL
-          </p>
-          <p className="mt-1 max-w-[52ch] text-[12.5px] leading-relaxed text-text-dim">
-            {summary}
-          </p>
+        <div className="rounded-sm border border-rule bg-raised p-2.5">
+          <p className="text-[12px] text-muted-foreground">What the encoders told the model</p>
+          <p className="mt-1 text-[13px] leading-relaxed text-text-dim">{summary}</p>
         </div>
       ) : null}
     </Section>

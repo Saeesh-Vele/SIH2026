@@ -35,17 +35,12 @@ export function TracePanel({
   const active = running || steps.some((s) => s.status === "running");
 
   return (
-    <section
-      className={cn(
-        "flex shrink-0 flex-col border-t border-rule bg-panel",
-        open && "h-64",
-      )}
-    >
+    <section className="flex flex-col rounded-sm border border-rule bg-panel">
       <button
         type="button"
         onClick={() => onOpenChange(!open)}
         aria-expanded={open}
-        className="flex h-9 shrink-0 items-center gap-2 px-3 text-left transition-colors hover:bg-raised"
+        className="flex h-10 shrink-0 items-center gap-2 rounded-sm px-3 text-left transition-colors hover:bg-raised"
       >
         <ChevronDown
           className={cn(
@@ -53,10 +48,8 @@ export function TracePanel({
             !open && "-rotate-90",
           )}
         />
-        <span className="font-mono text-[10px] tracking-[0.14em] text-text-dim">
-          EXECUTION TRACE
-        </span>
-        <span className="ml-auto flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+        <span className="text-[13px] text-foreground">Trace: every step it took</span>
+        <span className="ml-auto flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
           {steps.length > 0 ? (
             <>
               <StatusDot tone={active ? "caution" : "signal"} pulse={active} />
@@ -69,17 +62,17 @@ export function TracePanel({
               ) : null}
             </>
           ) : (
-            "idle"
+            "none yet"
           )}
         </span>
       </button>
 
       {open ? (
-        <ScrollArea className="min-h-0 flex-1 border-t border-rule">
+        <ScrollArea className="max-h-80 border-t border-rule">
           {steps.length === 0 ? (
-            <p className="p-3 font-mono text-[11px] text-muted-foreground">
-              Steps appear here as the agent works — which task it picked, which
-              model it loaded, and how long each stage took.
+            <p className="p-3 text-[12.5px] leading-relaxed text-muted-foreground">
+              Steps appear here as SatQuery works: what it decided you were asking, which model it
+              ran, and how long each stage took. Every run is saved with this record.
             </p>
           ) : (
             <ol className="p-3">
@@ -96,17 +89,17 @@ export function TracePanel({
                   </div>
                   <div className="min-w-0 flex-1 space-y-0.5">
                     <div className="flex items-baseline gap-2">
-                      <span className="font-mono text-[11px] text-foreground">
+                      <span className="font-mono text-[12px] text-foreground">
                         {step.label}
                       </span>
                       {step.duration_ms ? (
-                        <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">
+                        <span className="ml-auto shrink-0 font-mono text-[11px] text-muted-foreground">
                           {formatDuration(step.duration_ms)}
                         </span>
                       ) : null}
                     </div>
                     {step.detail ? (
-                      <p className="break-words font-mono text-[10.5px] leading-relaxed text-muted-foreground">
+                      <p className="break-words font-mono text-[11.5px] leading-relaxed text-muted-foreground">
                         {step.detail}
                       </p>
                     ) : null}

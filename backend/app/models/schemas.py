@@ -164,6 +164,7 @@ class ExecutionTraceCreate(BaseModel):
     #: optional: traces written before these fields existed lack them.
     uid: str | None = None
     upload_id: str | None = None
+    query: str | None = None
     answer: str | None = None
     overlays: list[dict[str, Any]] = Field(default_factory=list)
     metrics: list[dict[str, str]] = Field(default_factory=list)
@@ -183,6 +184,26 @@ class ExecutionTraceDoc(ExecutionTraceCreate):
 # --------------------------------------------------------------------------
 # uploads
 # --------------------------------------------------------------------------
+class AssetGeo(BaseModel):
+    """What the file's own header says about where and how big it is.
+
+    `status` decides what the console shows in place of coordinates:
+    "georeferenced" has them; "none" means the file has none to give (a PNG or
+    JPEG, or a TIFF without a CRS); "not_read" means we could not tell.
+    """
+
+    status: Literal["georeferenced", "none", "not_read"] = "not_read"
+    width: int | None = None
+    height: int | None = None
+    bands: int | None = None
+    crs: str | None = None
+    #: Scene centre, decimal degrees WGS84.
+    lat: float | None = None
+    lon: float | None = None
+    #: Ground sample distance, metres per pixel; only for metre-based CRSs.
+    gsd_m: float | None = None
+
+
 class UploadedAsset(BaseModel):
     asset_id: str
     filename: str
@@ -190,6 +211,8 @@ class UploadedAsset(BaseModel):
     size_bytes: int
     role: Literal["primary", "optical", "sar", "t0", "t1"] = "primary"
     stored_path: str
+    #: None on uploads made before headers were read.
+    geo: AssetGeo | None = None
 
 
 class UploadResponse(BaseModel):

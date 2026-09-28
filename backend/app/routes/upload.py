@@ -13,11 +13,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 
-from app.agent.nodes.intake import MANIFEST_NAME
+from app.agent.nodes.intake import MANIFEST_NAME, load_upload_record
 from app.core.auth import AuthUser, current_user
 from app.core.config import get_settings
+from app.core.imagery import raster_metadata, render_preview
 from app.db import mongo
 from app.models.schemas import UploadedAsset, UploadMode, UploadResponse
 
@@ -87,6 +89,7 @@ async def upload(
         asset_id = uuid.uuid4().hex
         stored_path = dest_dir / f"{asset_id}{Path(filename).suffix.lower()}"
         stored_path.write_bytes(payload)
+        geo = await run_in_threadpool(raster_metadata, stored_path)
 
         assets.append(
             UploadedAsset(
@@ -96,6 +99,7 @@ async def upload(
                 size_bytes=len(payload),
                 role=role,
                 stored_path=str(stored_path),
+                geo=geo,
             )
         )
 
@@ -126,3 +130,60 @@ async def upload(
             logger.warning("upload %s not indexed in mongo; manifest written", upload_id)
 
     return response
+
+
+async def _owned_upload(upload_id: str, user: AuthUser) -> dict:
+    """The caller's upload record, or 404 — someone else's reads as missing."""
+    record = await load_upload_record(upload_id)
+    if record is None or record.get("uid") != user.uid:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That upload was not found.")
+    return record
+
+
+@router.get("/upload/{upload_id}", response_model=UploadResponse)
+async def get_upload(upload_id: str, user: AuthUser = Depends(current_user)) -> UploadResponse:
+    """An earlier upload, so a past query can be reopened with its imagery."""
+    record = await _owned_upload(upload_id, user)
+    return UploadResponse(**{**record, "upload_id": upload_id})
+
+
+@router.get("/upload/{upload_id}/thumbnail")
+async def upload_thumbnail(upload_id: str, user: AuthUser = Depends(current_user)) -> Response:
+    """The upload's first image, for the history list: one request per row."""
+    record = await _owned_upload(upload_id, user)
+    assets = record.get("assets", [])
+    if not assets:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That upload has no images.")
+    return await asset_preview(upload_id, assets[0]["asset_id"], user)
+
+
+@router.get("/upload/{upload_id}/assets/{asset_id}/preview")
+async def asset_preview(
+    upload_id: str, asset_id: str, user: AuthUser = Depends(current_user)
+) -> Response:
+    """A true-colour PNG of one asset, rendered the way the models see it.
+
+    Fetched with the Authorization header like every other call — the console
+    turns it into a blob URL — so no token ever sits in an <img src>.
+    """
+    record = await _owned_upload(upload_id, user)
+    asset = next((a for a in record.get("assets", []) if a.get("asset_id") == asset_id), None)
+    if asset is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That image was not found.")
+    stored = Path(asset.get("stored_path", ""))
+    if not stored.exists():
+        raise HTTPException(
+            status.HTTP_410_GONE,
+            "This image is no longer stored on the server. Upload it again to view it.",
+        )
+    try:
+        data = await run_in_threadpool(render_preview, stored)
+    except Exception as exc:  # noqa: BLE001 - any decode failure is the same answer
+        logger.info("preview failed for %s: %s", asset_id, exc)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "A preview could not be made from this file."
+        ) from exc
+    return Response(
+        data, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"}
+    )
+

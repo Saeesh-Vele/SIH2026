@@ -1,52 +1,50 @@
 "use client";
 
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { UserMenu } from "@/components/auth/user-menu";
-import { Badge } from "@/components/ui/badge";
 import { StatusDot } from "@/components/status-dot";
-import { INTENT_CODES, INTENT_LABELS } from "@/lib/suggestions";
-import type { Intent, SceneMeta } from "@/lib/types";
+import { Wordmark } from "@/components/landing/wordmark";
+import { cn } from "@/lib/utils";
 
-export function TopBar({
-  scene,
-  intent,
-  busy,
-}: {
-  scene: SceneMeta | null;
-  intent: Intent | null;
-  busy: boolean;
-}) {
+const NAV = [
+  { href: "/console", label: "Console" },
+  { href: "/history", label: "History" },
+];
+
+export function TopBar({ busy = false, children }: { busy?: boolean; children?: React.ReactNode }) {
+  const pathname = usePathname();
+
   return (
-    <header className="flex h-12 shrink-0 items-center gap-4 border-b border-rule bg-panel px-4">
-      <div className="flex items-baseline gap-2">
-        <span className="text-[15px] font-semibold tracking-tight text-foreground">
-          SatQuery
-        </span>
-        <span className="font-mono text-[10px] text-signal">AI</span>
-      </div>
+    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-rule bg-panel px-3 sm:gap-4 sm:px-4">
+      <Link href="/" className="rounded-sm" aria-label="SatQuery AI home">
+        <Wordmark />
+      </Link>
 
-      <span className="h-4 w-px bg-rule" aria-hidden />
-
-      <p className="truncate font-mono text-[11px] text-muted-foreground">
-        {scene ? scene.sceneId : "no scene bound"}
-      </p>
+      <nav aria-label="Console" className="flex items-center gap-1">
+        {NAV.map((item) => (
+          <Link
+            key={item.href}
+            href={item.href}
+            aria-current={pathname === item.href ? "page" : undefined}
+            className={cn(
+              "rounded-sm px-2 py-1 text-[13px] transition-colors",
+              pathname === item.href ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {item.label}
+          </Link>
+        ))}
+      </nav>
 
       <div className="ml-auto flex items-center gap-3">
-        {intent ? (
-          <Badge
-            variant="outline"
-            className="gap-1.5 rounded-sm border-signal-deep bg-signal-deep/40 px-2 font-mono text-[10px] font-medium text-signal"
-          >
-            {INTENT_CODES[intent]}
-            <span className="text-signal/60">{INTENT_LABELS[intent]}</span>
-          </Badge>
+        {busy ? (
+          <span className="hidden items-center gap-2 text-[12px] text-text-dim sm:flex" role="status">
+            <StatusDot tone="signal" pulse />
+            Running
+          </span>
         ) : null}
-
-        <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.12em] text-muted-foreground">
-          <StatusDot tone={busy ? "signal" : "muted"} pulse={busy} />
-          {busy ? "RUNNING" : "IDLE"}
-        </div>
-
-        <span className="h-4 w-px bg-rule" aria-hidden />
+        {children}
         <UserMenu />
       </div>
     </header>

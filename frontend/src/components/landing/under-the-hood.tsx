@@ -7,7 +7,7 @@ const SPEC: { term: string; detail: React.ReactNode }[] = [
     term: "Questions and captions",
     detail: (
       <>
-        LLaVA-1.5 (7B), with a QLoRA adapter we fine-tuned on EuroSAT: Sentinel-2 land-cover
+        LLaVA-1.5 (7B), LoRA fine-tuned on EuroSAT: Sentinel-2 land-cover
         scenes.
       </>
     ),

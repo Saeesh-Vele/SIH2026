@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "samples": [
+    {
+      "id": "eurosat-river",
+      "status": "ready",
+      "title": "River bend and farmland",
+      "mode": "single",
+      "files": [
+        {
+          "role": "primary",
+          "path": "/samples/eurosat/river_8.tif",
+          "label": "Sentinel-2, all 13 bands, GeoTIFF"
+        }
+      ],
+      "question": "Is there a river in this image, and what surrounds it?",
+      "source": {
+        "name": "EuroSAT (multispectral), River_8.tif",
+        "url": "https://zenodo.org/records/7711810"
+      },
+      "licence": "MIT",
+      "attribution": "EuroSAT by Helber, Bischke, Dengel and Borth (2019), MIT licence. Contains modified Copernicus Sentinel-2 data.",
+      "thumbnail": "/samples/eurosat/river_8.thumb.png"
+    },
+    {
+      "id": "eurosat-industrial",
+      "status": "ready",
+      "title": "Industrial area",
+      "mode": "single",
+      "files": [
+        {
+          "role": "primary",
+          "path": "/samples/eurosat/industrial_4.tif",
+          "label": "Sentinel-2, all 13 bands, GeoTIFF"
+        }
+      ],
+      "question": "Describe this scene.",
+      "source": {
+        "name": "EuroSAT (multispectral), Industrial_4.tif",
+        "url": "https://zenodo.org/records/7711810"
+      },
+      "licence": "MIT",
+      "attribution": "EuroSAT by Helber, Bischke, Dengel and Borth (2019), MIT licence. Contains modified Copernicus Sentinel-2 data.",
+      "thumbnail": "/samples/eurosat/industrial_4.thumb.png"
+    },
+    {
+      "id": "eurosat-annualcrop",
+      "status": "ready",
+      "title": "Crop fields",
+      "mode": "single",
+      "files": [
+        {
+          "role": "primary",
+          "path": "/samples/eurosat/annualcrop_3.jpg",
+          "label": "Sentinel-2 true colour, JPEG"
+        }
+      ],
+      "question": "Is this area mostly farmland or forest?",
+      "source": {
+        "name": "EuroSAT (RGB), AnnualCrop_3.jpg",
+        "url": "https://zenodo.org/records/7711810"
+      },
+      "licence": "MIT",
+      "attribution": "EuroSAT by Helber, Bischke, Dengel and Borth (2019), MIT licence. Contains modified Copernicus Sentinel-2 data.",
+      "thumbnail": "/samples/eurosat/annualcrop_3.jpg"
+    },
+    {
+      "id": "copernicus-change",
+      "status": "missing",
+      "title": "Before and after",
+      "mode": "bi_temporal",
+      "files": [
+        {
+          "role": "t0",
+          "path": "/samples/copernicus/before.tif",
+          "label": "Sentinel-2 L2A true colour, 8-bit GeoTIFF (earlier date)"
+        },
+        {
+          "role": "t1",
+          "path": "/samples/copernicus/after.tif",
+          "label": "Sentinel-2 L2A true colour, 8-bit GeoTIFF (later date)"
+        }
+      ],
+      "question": "What changed between these two dates?",
+      "needs": "Two Sentinel-2 true-colour exports of the same area from Copernicus Browser: 8-bit TIFF, 512 × 512 px, earliest first.",
+      "source": {
+        "name": "Copernicus Browser, Sentinel-2 L2A True Color",
+        "url": "https://browser.dataspace.copernicus.eu/"
+      },
+      "licence": "Copernicus Sentinel data terms (free, full and open)",
+      "attribution": "Contains modified Copernicus Sentinel data [year].",
+      "thumbnail": null,
+      "dates": {
+        "t0": null,
+        "t1": null
+      }
+    },
+    {
+      "id": "fusion-pair",
+      "status": "missing",
+      "title": "Optical and radar",
+      "mode": "cross_modal",
+      "files": [],
+      "question": "What does the radar show that the photo doesn't?",
+      "needs": "A 13-band Sentinel-2 L1C GeoTIFF and a 2-band Sentinel-1 (VV, VH) GeoTIFF of the same footprint. Waiting on a licence check for SEN12MS.",
+      "source": null,
+      "licence": null,
+      "attribution": null,
+      "thumbnail": null
+    }
+  ]
+}

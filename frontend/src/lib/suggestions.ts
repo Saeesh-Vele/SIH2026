@@ -1,23 +1,30 @@
-import type { Intent } from "./types";
+import type { Intent, UploadMode } from "./types";
 
 /**
- * Starter questions, one per intent, shown in the console's command list.
- * They are prompts for the person, not canned answers — every one of them goes
- * to the controller like anything else typed by hand.
+ * Starter questions per imagery layout. They fill the question box; nothing
+ * is sent until the person runs it. Worded for what the models were tuned on —
+ * land cover at Sentinel-2 resolution, where a pixel is 10 m — rather than
+ * objects too small to see.
  */
-export const SUGGESTED_QUERIES: { text: string; intent: Intent }[] = [
-  { text: "How many aircraft are parked on the apron?", intent: "single_image_vqa" },
-  { text: "Is there a runway in this scene?", intent: "single_image_vqa" },
-  { text: "Describe what this scene contains.", intent: "single_image_captioning" },
-  { text: "What's visible in this image?", intent: "single_image_captioning" },
-  { text: "What changed between the two captures?", intent: "change_vqa" },
-  {
-    text: "The optical scene is cloudy — use SAR backscatter to confirm the vessels.",
-    intent: "optical_sar_fusion",
-  },
-];
+export const SUGGESTED_QUESTIONS: Record<UploadMode, string[]> = {
+  single: [
+    "Describe this scene.",
+    "Is this area mostly farmland or forest?",
+    "Is there a river or lake in this image?",
+    "Are there buildings or roads here?",
+  ],
+  bi_temporal: [
+    "What changed between these two dates?",
+    "Has any farmland become built-up land?",
+    "Did the water area grow or shrink?",
+  ],
+  cross_modal: [
+    "What does the radar show that the photo doesn't?",
+    "Describe this area using both images.",
+  ],
+};
 
-/** Short codes for the intents, for the console list and result badges. */
+/** Short codes for the intents, for result badges. */
 export const INTENT_CODES: Record<Intent, string> = {
   single_image_vqa: "VQA",
   single_image_captioning: "CAP",
@@ -26,8 +33,8 @@ export const INTENT_CODES: Record<Intent, string> = {
 };
 
 export const INTENT_LABELS: Record<Intent, string> = {
-  single_image_vqa: "Single-image VQA",
-  single_image_captioning: "Scene captioning",
-  change_vqa: "Change VQA",
-  optical_sar_fusion: "Optical–SAR fusion",
+  single_image_vqa: "Question",
+  single_image_captioning: "Scene description",
+  change_vqa: "Change",
+  optical_sar_fusion: "Optical + SAR",
 };

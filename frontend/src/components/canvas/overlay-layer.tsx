@@ -34,8 +34,8 @@ export function OverlayLayer({
               <polygon
                 key={mask.id}
                 points={mask.polygon.map(([x, y]) => `${x * 1000},${y * 1000}`).join(" ")}
-                fill={active ? "rgba(41, 231, 245, 0.22)" : "rgba(41, 231, 245, 0.12)"}
-                stroke={active ? "var(--signal)" : "rgba(41, 231, 245, 0.6)"}
+                fill={active ? "rgba(34, 201, 192, 0.22)" : "rgba(34, 201, 192, 0.12)"}
+                stroke={active ? "var(--signal)" : "rgba(34, 201, 192, 0.6)"}
                 strokeWidth={active ? 2.5 : 1.5}
                 vectorEffect="non-scaling-stroke"
                 className="cursor-pointer"

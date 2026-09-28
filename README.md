@@ -391,6 +391,28 @@ Frontend settings are the six `NEXT_PUBLIC_FIREBASE_*` variables in
 Email/Password and Anonymous providers, and add the hosted domain under
 *Authorized domains*, or Google sign-in fails with `auth/unauthorized-domain`.
 
+## Sample imagery and recorded examples
+
+The console's "Try a sample" gallery is driven by
+`frontend/public/samples/manifest.json`: each entry lists its files, source,
+licence and attribution. Samples go through the same upload and query path as
+a person's own files. The shipped samples are EuroSAT tiles (MIT licence;
+contains modified Copernicus Sentinel-2 data). The before/after and
+optical + SAR slots are listed as `"status": "missing"` until a suitable pair
+is added.
+
+`scripts/record_examples.py` runs every ready sample through the real graph
+on a GPU (Colab instructions are in its docstring) and writes the results.
+With `--landing <sample-id>` it also fills
+`frontend/src/content/landing-example.json`, which the landing page's
+"Ask it anything" section replays. The section stays hidden until then, and
+the script never publishes a run that did not end with status `ok`.
+
+GeoTIFF uploads are previewed through `GET /api/upload/{id}/assets/{asset}/preview`,
+the same 2–98 percentile true-colour render the models see, fetched with the
+Authorization header. Upload responses carry each file's CRS, centre and pixel
+size when its header has them.
+
 ## Deployment notes
 
 - **Hosted demo without a GPU:** set `SATQUERY_CPU_FALLBACK=1` in the
@@ -401,12 +423,22 @@ Email/Password and Anonymous providers, and add the hosted domain under
   `NEXT_PUBLIC_FIREBASE_*` variables on the frontend build.
 - Add the frontend's origin to `SATQUERY_CORS_ORIGINS` (a JSON list).
 
+## Known limitations
+
+- **Change detection reads colour images only.** `backend/app/models/change.py`
+  opens both dates with PIL (`Image.open(...).convert("RGB")`), which cannot
+  decode multi-band rasters, so a pair of 13-band Sentinel-2 GeoTIFFs fails.
+  Use 8-bit RGB PNG, JPEG or 3-band GeoTIFF pairs until it reads bands the way
+  VQA and fusion do.
+
 ## Tests
 
 ```bash
 python backend/tests/test_cpu_smoke.py      # graph paths, upload validation, routing
 python backend/tests/test_specialists.py    # change detection, fusion, dispatch
 python backend/tests/test_auth.py           # sign-in required, per-user history
+python backend/tests/test_preview.py        # georeferencing read from headers, owner-only previews
+python backend/tests/test_samples.py        # every "ready" gallery sample fits its engine
 python backend/tests/test_cpu_fallback.py   # the opt-in CPU fallback stays off, and honest when on
 ```
 

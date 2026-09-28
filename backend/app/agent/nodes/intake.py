@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,18 @@ async def _from_mongo(upload_id: str) -> dict[str, Any] | None:
         return None
 
 
+#: Upload ids are uuid4 hex, minted by /upload. Anything else — "../" above
+#: all, since the id becomes a directory name — is not an upload.
+_UPLOAD_ID = re.compile(r"[0-9a-f]{32}")
+
+
+async def load_upload_record(upload_id: str) -> dict[str, Any] | None:
+    """The stored upload, from Mongo when it is reachable, else the manifest."""
+    if not _UPLOAD_ID.fullmatch(upload_id):
+        return None
+    return await _from_mongo(upload_id) or _from_disk(upload_id)
+
+
 async def intake(state: GraphState) -> dict[str, Any]:
     started = time.perf_counter()
     upload_id = state.get("upload_id")
@@ -69,7 +82,7 @@ async def intake(state: GraphState) -> dict[str, Any]:
             ],
         }
 
-    record = await _from_mongo(upload_id) or _from_disk(upload_id)
+    record = await load_upload_record(upload_id)
 
     # Someone else's upload reads exactly like a missing one, so an upload id
     # alone tells a caller nothing about whether it exists.

@@ -80,6 +80,7 @@ async def trace_logger(state: GraphState) -> dict[str, Any]:
         timestamp=now,
         uid=state.get("uid"),
         upload_id=state.get("upload_id"),
+        query=state.get("query"),
         answer=state.get("answer"),
         overlays=[e for e in state.get("evidence", []) if e.get("kind") in {"box", "mask"}],
         metrics=list(state.get("metrics", [])),

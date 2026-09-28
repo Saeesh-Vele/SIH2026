@@ -52,27 +52,32 @@ export interface MaskOverlay {
 export type Overlay = BoxOverlay | MaskOverlay;
 
 /**
- * What we actually know about a bound scene.
- *
- * Everything georeferenced is nullable and null today: /upload stores the file
- * but does not yet read GeoTIFF headers, so the readout shows a dash rather
- * than a number nobody measured.
+ * What a file's own header says about it, read by the backend at upload.
+ * `status` decides what the console shows where coordinates would go:
+ * "none" is a format with no georeferencing (PNG, JPEG) or a TIFF without a
+ * CRS; "not_read" is anything we could not tell about. Nothing is guessed.
  */
+export interface AssetGeo {
+  status: "georeferenced" | "none" | "not_read";
+  width: number | null;
+  height: number | null;
+  bands: number | null;
+  crs: string | null;
+  /** Scene centre, decimal degrees WGS84. */
+  lat: number | null;
+  lon: number | null;
+  /** Ground sample distance, metres per pixel. */
+  gsd_m: number | null;
+}
+
+/** What we actually know about a bound scene. */
 export interface SceneMeta {
-  /** The filename, until a scene id can be read out of the header. */
   sceneId: string;
   role: AssetRole;
   sizeBytes: number;
   contentType: string | null;
-  sensor: string | null;
-  acquired: string | null;
-  /** Decimal degrees, WGS84. */
-  lat: number | null;
-  lon: number | null;
-  /** Ground sample distance, metres per pixel. */
-  gsd: number | null;
-  epsg: string | null;
-  bands: string[] | null;
+  /** Null on uploads made before headers were read. */
+  geo: AssetGeo | null;
 }
 
 export interface QueryResult {
@@ -113,6 +118,18 @@ export interface UploadedAsset {
   size_bytes: number;
   role: AssetRole;
   stored_path: string;
+  geo?: AssetGeo | null;
+}
+
+/** One past query, as /query/history returns it. */
+export interface HistoryItem {
+  _id: string;
+  query: string;
+  task_type: TaskType | null;
+  intent: Intent | null;
+  timestamp: string;
+  upload_id: string | null;
+  status: QueryStatus | null;
 }
 
 export interface UploadResult {

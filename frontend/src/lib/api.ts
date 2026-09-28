@@ -13,6 +13,7 @@
 import { getFirebaseAuth } from "./firebase";
 
 import type {
+  HistoryItem,
   Intent,
   QueryResult,
   StagedFile,
@@ -213,3 +214,111 @@ export async function streamQuery(
   if (!result) throw new ApiError("The run ended without a result", 500);
   return result;
 }
+
+/** An earlier upload, to reopen a past query with its imagery. */
+export async function getUpload(uploadId: string, signal?: AbortSignal): Promise<UploadResult> {
+  const response = await fetch(`${API_BASE}/upload/${encodeURIComponent(uploadId)}`, {
+    headers: await authHeader(),
+    signal,
+  });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  return (await response.json()) as UploadResult;
+}
+
+/**
+ * A true-colour PNG of one uploaded asset, as a blob: URL the caller must
+ * revoke. Fetched with the Authorization header, so the token never ends up
+ * in an <img src>.
+ */
+export async function fetchPreviewUrl(
+  uploadId: string,
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const response = await fetch(
+    `${API_BASE}/upload/${encodeURIComponent(uploadId)}/assets/${encodeURIComponent(assetId)}/preview`,
+    { headers: await authHeader(), signal },
+  );
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  return URL.createObjectURL(await response.blob());
+}
+
+/** The first image of an upload, for history rows. Same contract as fetchPreviewUrl. */
+export async function fetchThumbnailUrl(uploadId: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${API_BASE}/upload/${encodeURIComponent(uploadId)}/thumbnail`, {
+    headers: await authHeader(),
+    signal,
+  });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  return URL.createObjectURL(await response.blob());
+}
+
+export async function getHistory(limit = 50, signal?: AbortSignal): Promise<HistoryItem[]> {
+  const response = await fetch(`${API_BASE}/query/history?limit=${limit}`, {
+    headers: await authHeader(),
+    signal,
+  });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  return (await response.json()) as HistoryItem[];
+}
+
+/** Stored trace document, as /query/{id}/trace returns it. */
+interface TraceDocJson {
+  _id: string;
+  query_id: string | null;
+  task_selected: QueryResult["taskSelected"];
+  intent: Intent | null;
+  status: QueryResult["status"];
+  error: string | null;
+  models_used: string[];
+  confidence: number | null;
+  degraded: boolean;
+  degraded_reason: string | null;
+  steps: TraceStep[];
+  upload_id: string | null;
+  query: string | null;
+  /** Absent on runs stored before answers were kept. */
+  answer: string | null;
+  overlays: QueryResult["overlays"];
+  metrics: { label: string; value: string }[];
+}
+
+/** A past run, rebuilt into the same shape a live run produces. */
+export async function getStoredResult(
+  queryId: string,
+  signal?: AbortSignal,
+): Promise<{
+  result: QueryResult;
+  uploadId: string | null;
+  question: string | null;
+  answerStored: boolean;
+}> {
+  const response = await fetch(`${API_BASE}/query/${encodeURIComponent(queryId)}/trace`, {
+    headers: await authHeader(),
+    signal,
+  });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  const doc = (await response.json()) as TraceDocJson;
+  return {
+    uploadId: doc.upload_id,
+    question: doc.query,
+    answerStored: doc.answer != null,
+    result: toResult({
+      query_id: doc.query_id ?? queryId,
+      trace_id: doc._id,
+      status: doc.status,
+      intent: doc.intent,
+      task_selected: doc.task_selected,
+      answer: doc.answer ?? "",
+      confidence: doc.confidence,
+      degraded: doc.degraded,
+      degraded_reason: doc.degraded_reason,
+      overlays: doc.overlays ?? [],
+      models_used: doc.models_used ?? [],
+      metrics: doc.metrics ?? [],
+      steps: doc.steps ?? [],
+      error: doc.error,
+    }),
+  };
+}
+
