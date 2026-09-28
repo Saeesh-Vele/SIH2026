@@ -63,7 +63,7 @@ export function TracePanel({
               {steps.length} steps
               {totalMs > 0 ? (
                 <>
-                  <span className="text-rule-strong">│</span>
+                  <span className="text-rule-strong" aria-hidden>│</span>
                   {formatDuration(totalMs)}
                 </>
               ) : null}

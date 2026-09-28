@@ -2,29 +2,56 @@
 @import "tw-animate-css";
 
 /* ---------------------------------------------------------------------------
-   SatQuery AI — ground-station console.
-   Cold achromatic base; cyan is reserved for signal (live, active, selected),
-   amber for degraded or pending states. No blur, no translucent panels,
-   no shadows: depth comes from value steps and hairlines.
+   SatQuery AI — mission control at night.
+   Near-black space, cold achromatic surfaces. One accent, the uplink-blue to
+   telemetry-teal gradient, marks what is live, selected or actionable; teal
+   alone is `signal`. Amber is reserved for caution and degraded states and is
+   never decorative. Depth comes from value steps and hairlines; glow is kept
+   for focus and the one primary action on a screen.
+
+   Contrast (WCAG AA, checked against void/panel/raised): every text token
+   below is >= 4.5:1 on all three surfaces. `rule` and `rule-strong` are for
+   lines only, never text.
 --------------------------------------------------------------------------- */
 
 :root {
-  --void: #06090d;
+  /* surfaces */
+  --void: #05080d;
   --panel: #0b1117;
   --raised: #101922;
   --rule: #1c2833;
   --rule-strong: #2a3b49;
 
+  /* text: 11.7 / 6.9 / 5.4 : 1 on raised, the lightest surface */
   --text: #c6d4df;
   --text-dim: #90a4b3;
-  --text-muted: #6b8090;
+  --text-muted: #7c91a2;
 
-  --signal: #29e7f5;
-  --signal-deep: #0a3946;
+  /* accent: uplink blue -> telemetry teal. Void text on either end >= 6.2:1 */
+  --uplink: #4a8cff;
+  --signal: #22c9c0;
+  --signal-deep: #0a3a3c;
+  --accent-gradient: linear-gradient(100deg, var(--uplink) 0%, var(--signal) 100%);
+
+  /* status */
   --caution: #c99a4a;
   --alarm: #e0554b;
 
+  /* glow: focus and the single primary action only */
+  --glow-signal: 0 0 0 1px rgb(34 201 192 / 0.4), 0 0 28px -6px rgb(34 201 192 / 0.45);
+  --glow-uplink: 0 0 40px -8px rgb(74 140 255 / 0.5);
+
+  /* radius: controls are sharp, surfaces slightly softer */
   --radius: 2px;
+  --radius-surface: 4px;
+
+  /* motion: slow and linear-ish. Things drift and orbit; nothing bounces. */
+  --dur-fast: 150ms;
+  --dur-base: 280ms;
+  --dur-slow: 900ms;
+  --dur-orbit: 48s;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-drift: cubic-bezier(0.45, 0, 0.55, 1);
 
   /* shadcn surface tokens, mapped onto the palette above */
   --background: var(--void);
@@ -55,6 +82,7 @@
   --color-rule-strong: var(--rule-strong);
   --color-text-dim: var(--text-dim);
   --color-signal: var(--signal);
+  --color-uplink: var(--uplink);
   --color-signal-deep: var(--signal-deep);
   --color-caution: var(--caution);
   --color-alarm: var(--alarm);
@@ -83,8 +111,11 @@
 
   --radius-sm: 2px;
   --radius-md: 2px;
-  --radius-lg: 3px;
-  --radius-xl: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+
+  --shadow-glow-signal: var(--glow-signal);
+  --shadow-glow-uplink: var(--glow-uplink);
 }
 
 @layer base {
@@ -116,9 +147,10 @@
     color: var(--signal);
   }
 
+  /* Two pixels and an offset, so the ring clears hairline borders. */
   :focus-visible {
-    outline: 1px solid var(--signal);
-    outline-offset: 1px;
+    outline: 2px solid var(--signal);
+    outline-offset: 2px;
   }
 
   ::-webkit-scrollbar {
@@ -137,6 +169,37 @@
 }
 
 @layer utilities {
+  .bg-accent-gradient {
+    background-image: var(--accent-gradient);
+  }
+
+  .text-accent-gradient {
+    background-image: var(--accent-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* A faint, fixed star field: three layers of single-pixel points at
+     different densities. Static by design — the hero's particles are the only
+     stars that move, and only without reduced motion. */
+  .texture-starfield {
+    background-image:
+      radial-gradient(1px 1px at 12% 18%, rgb(198 212 223 / 0.55), transparent 60%),
+      radial-gradient(1px 1px at 68% 34%, rgb(198 212 223 / 0.4), transparent 60%),
+      radial-gradient(1px 1px at 38% 72%, rgb(198 212 223 / 0.45), transparent 60%),
+      radial-gradient(1px 1px at 84% 82%, rgb(198 212 223 / 0.35), transparent 60%),
+      radial-gradient(1px 1px at 22% 58%, rgb(74 140 255 / 0.5), transparent 60%),
+      radial-gradient(1px 1px at 91% 12%, rgb(34 201 192 / 0.45), transparent 60%);
+    background-size:
+      220px 220px,
+      310px 310px,
+      270px 270px,
+      390px 390px,
+      530px 530px,
+      470px 470px;
+  }
+
   /* Lat/lon graticule: a fine 24px net under a coarser 120px major grid. */
   .texture-graticule {
     background-image:
@@ -171,7 +234,37 @@
   }
 }
 
-/* Live status pulse — the only ambient motion on the page. */
+/* Hero load sequence: one orchestrated entrance, CSS-only so it runs before
+   hydration and collapses to nothing under reduced motion. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+.animate-rise-in {
+  animation: rise-in var(--dur-slow) var(--ease-out) both;
+}
+
+/* The satellite's orbit around the hero globe. */
+@keyframes orbit {
+  to {
+    offset-distance: 100%;
+  }
+}
+
+.animate-orbit {
+  animation: orbit var(--dur-orbit) linear infinite;
+}
+
+/* Live status pulse — the console's only ambient motion. */
 @keyframes signal-pulse {
   0%,
   100% {

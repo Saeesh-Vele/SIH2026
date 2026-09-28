@@ -1,0 +1,12 @@
+{
+  "status": "pending",
+  "sample_id": null,
+  "question": null,
+  "answer": null,
+  "confidence": null,
+  "degraded": null,
+  "task_selected": null,
+  "models_used": [],
+  "trace_line": null,
+  "recorded_at": null
+}

@@ -1,26 +1,34 @@
-import Link from "next/link";
+import type { Metadata } from "next";
+import { AskExample } from "@/components/landing/ask-example";
+import { Capabilities } from "@/components/landing/capabilities";
+import { Hero } from "@/components/landing/hero";
+import { Pipeline } from "@/components/landing/pipeline";
+import { SiteFooter } from "@/components/landing/site-footer";
+import { SiteHeader } from "@/components/landing/site-header";
+import { UnderTheHood } from "@/components/landing/under-the-hood";
 
-/**
- * Placeholder landing page. Phase 2 replaces it with the full landing; until
- * then it only needs to get a visitor into the console.
- */
+export const metadata: Metadata = {
+  title: "SatQuery AI — ask satellite imagery a question",
+};
+
 export default function LandingPage() {
   return (
-    <main className="texture-graticule flex min-h-dvh flex-col items-center justify-center gap-6 bg-void px-4 text-center">
-      <div className="flex items-baseline gap-2">
-        <span className="text-2xl font-semibold tracking-tight text-foreground">SatQuery</span>
-        <span className="font-mono text-xs text-signal">AI</span>
-      </div>
-      <p className="max-w-md text-[15px] leading-relaxed text-text-dim">
-        Ask questions about satellite imagery in plain language, and see how each answer was
-        produced.
-      </p>
-      <Link
-        href="/console"
-        className="rounded-sm bg-signal px-5 py-2.5 text-[13px] font-medium text-void transition-colors hover:bg-signal/85"
+    <div className="texture-starfield min-h-dvh bg-void">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-panel focus:px-3 focus:py-2 focus:text-foreground"
       >
-        Launch console
-      </Link>
-    </main>
+        Skip to content
+      </a>
+      <SiteHeader />
+      <main id="main" className="-mt-16">
+        <Hero />
+        <AskExample />
+        <Capabilities />
+        <Pipeline />
+        <UnderTheHood />
+      </main>
+      <SiteFooter />
+    </div>
   );
 }

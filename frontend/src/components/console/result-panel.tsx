@@ -184,7 +184,7 @@ function Answer({ result, panes }: { result: QueryResult; panes: Pane[] }) {
           <div className="flex items-baseline justify-between font-mono text-[10px]">
             <span className="text-muted-foreground">
               confidence
-              <span className="ml-1.5 text-rule-strong">mean token probability</span>
+              <span className="ml-1.5 text-muted-foreground">mean token probability</span>
             </span>
             <span
               className={cn(
@@ -350,7 +350,7 @@ function ChangeReport({ masks }: { masks: MaskOverlay[] }) {
       <ul className="divide-y divide-rule border border-rule">
         {masks.map((mask) => (
           <li key={mask.id} className="flex items-baseline gap-3 px-2 py-1 font-mono text-[11px]">
-            <span className="shrink-0 text-rule-strong">{mask.id}</span>
+            <span className="shrink-0 text-muted-foreground">{mask.id}</span>
             <span className="truncate text-text-dim">{mask.label}</span>
             <span className="h-px min-w-3 flex-1 translate-y-[-3px] bg-rule" aria-hidden />
             {mask.area !== undefined ? (

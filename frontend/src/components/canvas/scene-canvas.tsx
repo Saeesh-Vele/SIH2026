@@ -223,7 +223,7 @@ function ReadoutStrip({
       {cells.map(([name, value]) => (
         <span key={name} className="flex items-baseline gap-1.5">
           <span className="text-muted-foreground">{name}</span>
-          <span className={cn(value === dash ? "text-rule-strong" : "text-text-dim")}>
+          <span className={cn(value === dash ? "text-muted-foreground" : "text-text-dim")}>
             {value}
           </span>
         </span>
