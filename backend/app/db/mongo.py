@@ -100,6 +100,8 @@ async def ping() -> bool:
 async def _ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await db[QUERY_HISTORY].create_index([("timestamp", DESCENDING)])
     await db[QUERY_HISTORY].create_index([("task_type", ASCENDING)])
+    await db[QUERY_HISTORY].create_index([("uid", ASCENDING), ("timestamp", DESCENDING)])
+    await db[EXECUTION_TRACES].create_index([("uid", ASCENDING), ("query_id", ASCENDING)])
     await db[EXECUTION_TRACES].create_index([("timestamp", DESCENDING)])
     await db[EXECUTION_TRACES].create_index([("query_id", ASCENDING)])
     await db[EXECUTION_TRACES].create_index([("task_selected", ASCENDING)])

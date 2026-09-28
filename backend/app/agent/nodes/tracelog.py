@@ -55,6 +55,9 @@ async def trace_logger(state: GraphState) -> dict[str, Any]:
         intent=intent,
         asset_ids=[a.get("asset_id", "") for a in state.get("assets", [])],
         timestamp=now,
+        uid=state.get("uid"),
+        upload_id=state.get("upload_id"),
+        status=status,
     )
     trace = ExecutionTraceDoc(
         _id=trace_id,
@@ -75,6 +78,11 @@ async def trace_logger(state: GraphState) -> dict[str, Any]:
         degraded_reason=state.get("degraded_reason"),
         steps=list(state.get("steps", [])),
         timestamp=now,
+        uid=state.get("uid"),
+        upload_id=state.get("upload_id"),
+        answer=state.get("answer"),
+        overlays=[e for e in state.get("evidence", []) if e.get("kind") in {"box", "mask"}],
+        metrics=list(state.get("metrics", [])),
     )
 
     try:

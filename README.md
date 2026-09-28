@@ -93,7 +93,7 @@ fusion, which produces a described scene rather than geometry.
 ```bash
 cd frontend
 npm install
-npm run dev          # http://localhost:3000
+npm run dev          # http://localhost:3000 (console at /console)
 ```
 
 Set `NEXT_PUBLIC_API_BASE_URL` if the backend is not on `localhost:8000`; see
@@ -363,11 +363,50 @@ nothing measured one, and the step detail starts with `DEGRADED`. The console
 shows a *Degraded mode — CPU fallback* badge. The first fallback query downloads
 BLIP (~1.4 GB) unless it is already cached.
 
+### Sign-in
+
+The console requires a signed-in user; the landing page and `GET /api/health`
+are public. The frontend signs in with Firebase (Google, email/password, or
+"Continue as guest" via anonymous auth) and sends `Authorization: Bearer
+<idToken>` on every API call. The backend verifies it on `/upload`, `/query`,
+`/query/stream`, `/query/history` and `/query/{id}/trace`, stamps the caller's
+uid on the stored history and trace, and returns only that user's records.
+Someone else's upload or trace reads as not found.
+
+Backend settings (in `backend/.env` or the environment):
+
+| Variable | |
+|---|---|
+| `SATQUERY_FIREBASE_PROJECT_ID` | **Primary.** Verification only needs the project id; it is not a secret. |
+| `SATQUERY_FIREBASE_SERVICE_ACCOUNT_PATH` | Optional. Path to a service-account JSON file. |
+| `SATQUERY_FIREBASE_SERVICE_ACCOUNT_JSON` | Optional. The same JSON as a string, for deployment secrets. |
+
+With none of them set, protected routes answer **503** and never let a request
+through. There is no bypass switch; tests replace the verifier with FastAPI's
+`dependency_overrides`. Service-account files match the `*service-account*.json`
+/ `*firebase-adminsdk*.json` patterns in `.gitignore`. Never commit one.
+
+Frontend settings are the six `NEXT_PUBLIC_FIREBASE_*` variables in
+`frontend/.env.example`. In the Firebase console, enable the Google,
+Email/Password and Anonymous providers, and add the hosted domain under
+*Authorized domains*, or Google sign-in fails with `auth/unauthorized-domain`.
+
+## Deployment notes
+
+- **Hosted demo without a GPU:** set `SATQUERY_CPU_FALLBACK=1` in the
+  deployment environment only. The repo default in `model_config.yaml` stays
+  `enabled: false`. Every answer from that host is labelled *Degraded mode — CPU
+  fallback* with confidence "not measured", as described above.
+- Set `SATQUERY_FIREBASE_PROJECT_ID` on the backend and the
+  `NEXT_PUBLIC_FIREBASE_*` variables on the frontend build.
+- Add the frontend's origin to `SATQUERY_CORS_ORIGINS` (a JSON list).
+
 ## Tests
 
 ```bash
 python backend/tests/test_cpu_smoke.py      # graph paths, upload validation, routing
 python backend/tests/test_specialists.py    # change detection, fusion, dispatch
+python backend/tests/test_auth.py           # sign-in required, per-user history
 python backend/tests/test_cpu_fallback.py   # the opt-in CPU fallback stays off, and honest when on
 ```
 

@@ -34,3 +34,11 @@ backend/weights/
 
 # OS
 .DS_Store
+
+# Firebase service-account keys are secrets. Never commit one.
+*firebase-adminsdk*.json
+*service-account*.json
+*serviceAccount*.json
+
+# TypeScript incremental build cache
+*.tsbuildinfo

@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     openrouter_referer: str | None = None
     openrouter_timeout_s: float = 20.0
 
+    # Firebase ID-token verification. The project id is all verification
+    # needs — tokens are checked against Google's public certificates — so it
+    # is the primary setting and carries no secret. A service account is
+    # optional; when given without a project id, its own project is used.
+    # With none of the three set, protected routes refuse every request.
+    firebase_project_id: str | None = None
+    firebase_service_account_path: Path | None = None
+    firebase_service_account_json: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -13,9 +13,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.agent.nodes.intake import MANIFEST_NAME
+from app.core.auth import AuthUser, current_user
 from app.core.config import get_settings
 from app.db import mongo
 from app.models.schemas import UploadedAsset, UploadMode, UploadResponse
@@ -57,6 +58,7 @@ async def upload(
     mode: UploadMode = Form(UploadMode.SINGLE),
     benchmark_mode: bool = Form(False),
     files: list[UploadFile] = File(...),
+    user: AuthUser = Depends(current_user),
 ) -> UploadResponse:
     roles = MODE_ROLES[mode]
     if len(files) != len(roles):
@@ -105,7 +107,9 @@ async def upload(
         created_at=datetime.now(timezone.utc),
     )
 
-    record = response.model_dump(mode="json")
+    # The owner is stored with the upload but not echoed back: intake checks it
+    # so an upload id is useless to anyone but the person who made it.
+    record = {**response.model_dump(mode="json"), "uid": user.uid}
 
     # The manifest is what the graph reads when Mongo is unreachable: the
     # imagery is on disk either way, so a missing database must not cost us the

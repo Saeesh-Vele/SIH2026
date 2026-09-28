@@ -30,6 +30,9 @@ class GraphState(TypedDict, total=False):
     forced_intent: Intent | None
     parameters: dict[str, Any]
     query_id: str
+    #: Firebase uid of the caller. Intake refuses uploads it does not own, and
+    #: trace_logger stamps it on the stored records.
+    uid: str | None
 
     # -- intake -------------------------------------------------------------
     assets: list[dict[str, Any]]

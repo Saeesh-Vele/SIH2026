@@ -1,0 +1,17 @@
+{
+  "upload_id": "de30ac3b07784df5846375d5185f7b26",
+  "mode": "single",
+  "benchmark_mode": true,
+  "assets": [
+    {
+      "asset_id": "79fcc389679f4679a245b65dcf90872c",
+      "filename": "WhatsApp Image 2026-09-27 at 13.11.32.jpeg",
+      "content_type": "image/jpeg",
+      "size_bytes": 108771,
+      "role": "primary",
+      "stored_path": "/Users/saeeshsandipvele/SIH2026/backend/storage/uploads/de30ac3b07784df5846375d5185f7b26/79fcc389679f4679a245b65dcf90872c.jpeg"
+    }
+  ],
+  "created_at": "2026-09-28T17:29:31.509083Z",
+  "uid": "d7mhFwVbIJXxNXhNHYE6r7bzKDo2"
+}

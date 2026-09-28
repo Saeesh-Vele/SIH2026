@@ -1,5 +1,6 @@
 "use client";
 
+import { UserMenu } from "@/components/auth/user-menu";
 import { Badge } from "@/components/ui/badge";
 import { StatusDot } from "@/components/status-dot";
 import { INTENT_CODES, INTENT_LABELS } from "@/lib/suggestions";
@@ -44,6 +45,9 @@ export function TopBar({
           <StatusDot tone={busy ? "signal" : "muted"} pulse={busy} />
           {busy ? "RUNNING" : "IDLE"}
         </div>
+
+        <span className="h-4 w-px bg-rule" aria-hidden />
+        <UserMenu />
       </div>
     </header>
   );

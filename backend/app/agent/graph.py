@@ -111,10 +111,12 @@ def initial_state(
     upload_id: str | None = None,
     forced_intent: Intent | None = None,
     parameters: dict[str, Any] | None = None,
+    uid: str | None = None,
 ) -> GraphState:
     return {
         "query": query,
         "query_id": uuid.uuid4().hex,
+        "uid": uid,
         "upload_id": upload_id,
         "forced_intent": forced_intent,
         "parameters": parameters or {},

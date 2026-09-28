@@ -4,7 +4,13 @@
  * Two ways to run a query: `runQuery` waits for the whole thing, `streamQuery`
  * reports each controller step as it lands. The console uses the streaming one
  * so the trace fills in while the VQA model loads and decodes.
+ *
+ * Every call except the health probe carries `Authorization: Bearer <idToken>`.
+ * The token is fetched per request — Firebase hands back a cached one and
+ * refreshes it itself when it nears expiry — and never goes in a URL.
  */
+
+import { getFirebaseAuth } from "./firebase";
 
 import type {
   Intent,
@@ -26,6 +32,13 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** The signed-in user's ID token as a header, or a 401 if nobody is signed in. */
+async function authHeader(): Promise<{ Authorization: string }> {
+  const user = getFirebaseAuth()?.currentUser;
+  if (!user) throw new ApiError("Sign in to continue.", 401);
+  return { Authorization: `Bearer ${await user.getIdToken()}` };
 }
 
 /** FastAPI puts the message in `detail`, which may itself be a validation list. */
@@ -65,7 +78,11 @@ export async function uploadScene(
   // Order matters: the backend zips files onto the roles the mode expects.
   for (const staged of files) form.append("files", staged.file, staged.name);
 
-  const response = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+  const response = await fetch(`${API_BASE}/upload`, {
+    method: "POST",
+    headers: await authHeader(),
+    body: form,
+  });
   if (!response.ok) throw new ApiError(await readError(response), response.status);
   return (await response.json()) as UploadResult;
 }
@@ -116,7 +133,7 @@ function toResult(json: QueryResponseJson): QueryResult {
 export async function runQuery(body: QueryBody, signal?: AbortSignal): Promise<QueryResult> {
   const response = await fetch(`${API_BASE}/query`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal,
   });
@@ -144,7 +161,11 @@ export async function streamQuery(
 ): Promise<QueryResult> {
   const response = await fetch(`${API_BASE}/query/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    headers: {
+      ...(await authHeader()),
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
     body: JSON.stringify(body),
     signal,
   });

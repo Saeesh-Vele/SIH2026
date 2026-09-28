@@ -71,6 +71,11 @@ async def intake(state: GraphState) -> dict[str, Any]:
 
     record = await _from_mongo(upload_id) or _from_disk(upload_id)
 
+    # Someone else's upload reads exactly like a missing one, so an upload id
+    # alone tells a caller nothing about whether it exists.
+    if record is not None and record.get("uid") != state.get("uid"):
+        record = None
+
     if record is None:
         return {
             "assets": [],

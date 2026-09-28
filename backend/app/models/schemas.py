@@ -104,6 +104,12 @@ class QueryHistoryDoc(QueryHistoryBase):
     id: str = Field(..., alias="_id")
     asset_ids: list[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=_utcnow)
+    #: Firebase uid of whoever asked. None on records written before sign-in
+    #: existed; those are never returned by the per-user history endpoint.
+    uid: str | None = None
+    #: The upload the question was asked about, so the console can reopen it.
+    upload_id: str | None = None
+    status: QueryStatus | None = None
 
 
 def _check_degraded_confidence(model: Any) -> Any:
@@ -154,6 +160,13 @@ class ExecutionTraceCreate(BaseModel):
     degraded: bool = False
     degraded_reason: str | None = None
     steps: list[TraceStep] = Field(default_factory=list)
+    #: Owner and outcome, so a past run can be reopened as it was shown. All
+    #: optional: traces written before these fields existed lack them.
+    uid: str | None = None
+    upload_id: str | None = None
+    answer: str | None = None
+    overlays: list[dict[str, Any]] = Field(default_factory=list)
+    metrics: list[dict[str, str]] = Field(default_factory=list)
 
     _degraded_confidence = model_validator(mode="after")(_check_degraded_confidence)
 

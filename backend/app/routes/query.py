@@ -11,10 +11,11 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
 from app.agent.graph import get_graph, initial_state, node_sequence
+from app.core.auth import AuthUser, current_user
 from app.db import mongo
 from app.models.schemas import (
     INTENT_TO_TASK,
@@ -56,13 +57,16 @@ def _to_response(state: dict[str, Any]) -> QueryResponse:
 
 
 @router.post("/query", response_model=QueryResponse)
-async def submit_query(payload: QueryRequest) -> QueryResponse:
+async def submit_query(
+    payload: QueryRequest, user: AuthUser = Depends(current_user)
+) -> QueryResponse:
     """Run the graph to completion and return the result."""
     state = initial_state(
         query=payload.query,
         upload_id=payload.upload_id,
         forced_intent=payload.intent,
         parameters=payload.parameters,
+        uid=user.uid,
     )
     final = await get_graph().ainvoke(state)
     return _to_response(final)
@@ -73,7 +77,9 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 @router.post("/query/stream")
-async def stream_query(payload: QueryRequest) -> StreamingResponse:
+async def stream_query(
+    payload: QueryRequest, user: AuthUser = Depends(current_user)
+) -> StreamingResponse:
     """Run the graph, emitting each node's trace steps as they complete.
 
     Events: `plan` once up front, `step` per trace entry, then `result` or
@@ -85,6 +91,7 @@ async def stream_query(payload: QueryRequest) -> StreamingResponse:
         upload_id=payload.upload_id,
         forced_intent=payload.intent,
         parameters=payload.parameters,
+        uid=user.uid,
     )
 
     async def events() -> AsyncIterator[str]:
@@ -116,9 +123,18 @@ async def stream_query(payload: QueryRequest) -> StreamingResponse:
 
 
 @router.get("/query/history", response_model=list[QueryHistoryDoc])
-async def query_history(limit: int = Query(50, ge=1, le=200)) -> list[QueryHistoryDoc]:
+async def query_history(
+    limit: int = Query(50, ge=1, le=200), user: AuthUser = Depends(current_user)
+) -> list[QueryHistoryDoc]:
+    """The caller's own past queries, newest first. Records from before
+    sign-in existed carry no uid and match nobody."""
     try:
-        cursor = mongo.get_db()[mongo.QUERY_HISTORY].find().sort("timestamp", -1).limit(limit)
+        cursor = (
+            mongo.get_db()[mongo.QUERY_HISTORY]
+            .find({"uid": user.uid})
+            .sort("timestamp", -1)
+            .limit(limit)
+        )
         return [QueryHistoryDoc(**doc) async for doc in cursor]
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
@@ -127,9 +143,12 @@ async def query_history(limit: int = Query(50, ge=1, le=200)) -> list[QueryHisto
 
 
 @router.get("/query/{query_id}/trace", response_model=ExecutionTraceDoc)
-async def query_trace(query_id: str) -> ExecutionTraceDoc:
+async def query_trace(query_id: str, user: AuthUser = Depends(current_user)) -> ExecutionTraceDoc:
     try:
-        doc = await mongo.get_db()[mongo.EXECUTION_TRACES].find_one({"query_id": query_id})
+        # Another user's trace is reported exactly like a missing one.
+        doc = await mongo.get_db()[mongo.EXECUTION_TRACES].find_one(
+            {"query_id": query_id, "uid": user.uid}
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, f"trace store unavailable: {exc}"
